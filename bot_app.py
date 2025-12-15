@@ -6,19 +6,30 @@ import re
 import json
 import os
 import sys
-
-# --- НОВЫЕ ИМПОРТЫ ДЛЯ WEBHOOK/RENDER ---
 from contextlib import asynccontextmanager
+
+# --- ИМПОРТЫ ДЛЯ WEBHOOK/RENDER ---
 from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from gunicorn.app.base import BaseApplication
-from aiogram.fsm.storage.memory import MemoryStorage # Добавлен для FSM
-# ----------------------------------------
+# ----------------------------------
+
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
 
 # --- 1. КОНФИГУРАЦИЯ И КОНСТАНТЫ ---
 
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+
 # !!! ВАЖНО: ЗАМЕНИТЕ ЭТИ ЗНАЧЕНИЯ !!!
-# API_TOKEN должен быть получен из ENV на Render, но оставляем для локального теста
-API_TOKEN = os.getenv("BOT_TOKEN", '8483546485:AAEtBnI8QDW07CgHbHXoapLYov1ELwORjeA') # ВАШ ТОКЕН
+# API_TOKEN должен быть получен из ENV на Render
+API_TOKEN = os.getenv("BOT_TOKEN", '8483546485:AAEtBnI8QDW07CgHbHXoapLYov1ELwORjeA') # ВАШ ТОКЕН (для теста)
 ADMIN_ID = 752078351 # ВАШ ID
 ADMIN_USERNAME = "@Dina_Di_Ru"
 CONTACT_PHONES = ["+998972488886", "+998975690286"]
@@ -36,7 +47,7 @@ BASE_WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")
 WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}" if BASE_WEBHOOK_URL else None
 # ----------------------------------------
 
-# --- 2. БАЗА ДАННЫХ (БЕЗ ИЗМЕНЕНИЙ) ---
+# --- 2. БАЗА ДАННЫХ ---
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -140,19 +151,12 @@ def clear_questions():
 
 
 # --- 3. НАСТРОЙКА БОТА, ТЕКСТЫ И ПРЕДМЕТЫ ---
-logging.basicConfig(level=logging.INFO)
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest
 
 # Инициализация диспетчера с хранилищем (обязательно для FSM)
 dp = Dispatcher(storage=MemoryStorage())
 bot = Bot(token=API_TOKEN)
 
-# ИСПРАВЛЕННЫЙ БЛОК ТЕКСТОВ: Все узбекские строки с апострофами обернуты в ДВОЙНЫЕ кавычки
+# Текстовые константы
 STRINGS = {
     'ru': {
         'menu': 'Выберите действие:', 'sub': '📚 Курсы', 'reg': '📞 Регистрация',
@@ -337,14 +341,14 @@ async def route(c: types.CallbackQuery, state: FSMContext):
 
     elif act == "loc":
         await bot.send_location(c.message.chat.id, 
-                                 latitude=LOCATION_COORDS['latitude'], 
-                                 longitude=LOCATION_COORDS['longitude'])
+                                latitude=LOCATION_COORDS['latitude'], 
+                                longitude=LOCATION_COORDS['longitude'])
 
         text = (
             "📍 **Мы находимся здесь:**\n"
-            "[Открыть в Google Maps](https://maps.app.goo.gl/YourActualLink)" if lang == 'ru' else
+            "[Открыть в Google Maps](https://maps.app.goo.gl/izTkwcwZbA6ygBcj7)" if lang == 'ru' else
             "📍 **Biz bu yerda joylashganmiz:**\n"
-            "[Google Xaritada ochish](https://maps.app.goo.gl/YourActualLink)"
+            "[Google Xaritada ochish](https://maps.app.goo.gl/izTkwcwZbA6ygBcj7)"
         )
         await c.message.answer(text, parse_mode="Markdown")
 
@@ -406,10 +410,8 @@ async def route(c: types.CallbackQuery, state: FSMContext):
             select_prompt = "Для выбора курса нажмите '✏️ Изменить данные/курс'."
 
         else:  # uzb
-            # --- ИСПРАВЛЕНИЕ IndentationError (Блок else был без отступа) ---
             if not user_data:
-                # ВАША ИСПРАВЛЕННАЯ СТРОКА с ТЕКСТОМ и ОТСТУПОМ
-                await c.message.answer(f"❌ {STRINGS['uzb']['cab'].replace('👤 Kabinet', 'Siz hali ro\'yxatdan o\'tmagansiz.')} '{STRINGS['uzb']['reg']}' tugmasini bosing.",
+                await c.message.answer(f"❌ Siz hali ro'yxatdan o'tmagansiz. '{STRINGS['uzb']['reg']}' tugmasini bosing.",
                                         reply_markup=main_kb(lang))
                 return
             
@@ -418,8 +420,7 @@ async def route(c: types.CallbackQuery, state: FSMContext):
             button_text = "✏️ Ma'lumotlarni/kursni o'zgartirish"
             not_selected = "❌ Tanlanmagan"
             select_prompt = "Kursni tanlash uchun '✏️ Ma'lumotlarni/kursni o'zgartirish' tugmasini bosing."
-            # -----------------------------------------------------------------
-
+            
         if course_key and course_key in SUBJECTS:
             course_name = SUBJECTS[course_key][lang]['name']
             
@@ -427,6 +428,7 @@ async def route(c: types.CallbackQuery, state: FSMContext):
             text += f"\n{course_text} <b>{course_name}</b>\n"
             
             try:
+                # Берем расписание первого преподавателя в списке
                 schedule = SUBJECTS[course_key][lang]['items'][0]['s']
                 
                 schedule_header = STRINGS[lang]['schedule_header']
@@ -510,7 +512,6 @@ async def enroll_course(c: types.CallbackQuery, state: FSMContext):
     course_name = SUBJECTS[course_key][lang]['name']
     
     user_data = get_user_data(c.from_user.id)
-    # Исправление: если user_data нет (хотя не должно быть), даем значения по умолчанию
     name, phone, _ = user_data if user_data else ("Неизвестно", "Неизвестно", None)
 
     await bot.send_message(
@@ -607,7 +608,7 @@ async def show_det(c: types.CallbackQuery):
         await c.message.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
 
 
-# --- ОБРАБОТЧИКИ ТЕСТА (БЕЗ ИЗМЕНЕНИЙ) ---
+# --- ОБРАБОТЧИКИ ТЕСТА ---
 
 async def ask_test_question(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -628,7 +629,7 @@ async def ask_test_question(message: types.Message, state: FSMContext):
     option_names = ['A', 'B', 'C', 'D']
     for i, option in enumerate(options):
         kb.add(types.InlineKeyboardButton(text=f"{option_names[i]}) {option}",
-                                             callback_data=f"test_q_{q_index}_{i}"))
+                                          callback_data=f"test_q_{q_index}_{i}"))
 
     kb.adjust(2)
 
@@ -651,6 +652,11 @@ async def process_test_answer(c: types.CallbackQuery, state: FSMContext):
     current_score = data['test_score']
     lang = data['l']
 
+    # Проверка, что индекс вопроса соответствует текущему ожидаемому
+    if q_index_answered != data['question_index']:
+        # Если пришел ответ на старый вопрос, игнорируем
+        return
+
     correct_answer_index = questions[q_index_answered][2]
 
     try:
@@ -672,10 +678,6 @@ async def process_test_answer(c: types.CallbackQuery, state: FSMContext):
     await ask_test_question(c.message, state)
 
 
-# --- ИСПРАВЛЕННЫЕ ОБРАБОТЧИКИ ТЕСТА ---
-
-# ... (остальной код) ...
-
 async def finish_test(message: types.Message, state: FSMContext):
     data = await state.get_data()
     final_score = data['test_score']
@@ -696,9 +698,6 @@ async def finish_test(message: types.Message, state: FSMContext):
         recommendation = ("Отличный результат! Вы можете попробовать курс подготовки к IELTS." if lang == 'ru' else
                           "Ajoyib natija! Siz IELTS ga tayyorgarlik kursini sinab ko'rishingiz mumkin.")
     
-    # --- ИСПРАВЛЕННЫЙ БЛОК: Устранено использование слэшей и вложенных кавычек в f-строке ---
-    
-    # Определяем основные переменные для текста
     header = "Тест завершен!" if lang == 'ru' else "Test yakunlandi!"
     result_label = "Ваш результат:" if lang == 'ru' else "Sizning taxminiy darajangiz (aniq emas):"
     correct_answers_text = "правильных ответов." if lang == 'ru' else "to'g'ri javob."
@@ -713,17 +712,14 @@ async def finish_test(message: types.Message, state: FSMContext):
         f"💡 **{rec_label}** {recommendation}\n\n"
         f"{footer_text}"
     )
-    # ----------------------------------------------------------------------------------------
 
     await message.answer(result_text, parse_mode="Markdown")
 
     await state.clear()
     await message.answer(s['menu'], reply_markup=main_kb(lang))
 
-# ... (остальной код) ...
 
-
-# --- ОБРАБОТЧИКИ АДМИНА ---
+# --- 6. ОБРАБОТЧИКИ АДМИНА ---
 
 @dp.message(Command("admin"))
 async def admin(m: types.Message):
@@ -752,127 +748,160 @@ async def adm_l(c: types.CallbackQuery):
         text = f"👤 ФИО: {full_name}\n📞 Телефон: {phone}\nID: {user_id}"
         kb = InlineKeyboardBuilder()
         kb.add(types.InlineKeyboardButton(text="❌ Удалить", callback_data=f"adm_del_u_{user_id}"))
-        await c.message.answer(text, reply_markup=kb.as_markup())
+        try:
+            await c.message.answer(text, reply_markup=kb.as_markup())
+        except Exception as e:
+            logging.error(f"Error sending user list: {e}")
 
-    await c.message.answer("--- Конец списка учеников ---")
-
+@dp.callback_query(F.data.startswith("adm_del_u_"))
+async def adm_del_u(c: types.CallbackQuery):
+    await c.answer()
+    _, _, _, user_id = c.data.split("_")
+    delete_user(int(user_id))
+    await c.message.edit_text(f"❌ Пользователь (ID: {user_id}) удален из базы.")
 
 @dp.callback_query(F.data == "adm_q")
 async def adm_q(c: types.CallbackQuery):
     await c.answer()
     questions = get_all_questions()
     if not questions:
-        await c.message.answer("Список вопросов пуст.")
+        await c.message.answer("База вопросов пуста.")
         return
 
-    await c.message.answer("❓ Анонимные вопросы (нажмите '🗑 Удалить' для удаления записи):")
+    await c.message.answer("❓ Список вопросов (нажмите '❌ Удалить' для удаления):")
 
     for q in questions:
-        q_id, question_text, date = q
-        text = f"❓ Вопрос #{q_id} от {date}:\n{question_text}"
+        q_id, text, date = q
+        text_out = f"📝 Дата: {date}\nТекст: {text}\nID: {q_id}"
         kb = InlineKeyboardBuilder()
-        kb.add(types.InlineKeyboardButton(text="🗑 Удалить", callback_data=f"adm_del_q_{q_id}"))
-        await c.message.answer(text, reply_markup=kb.as_markup())
+        kb.add(types.InlineKeyboardButton(text="❌ Удалить", callback_data=f"adm_del_q_{q_id}"))
+        try:
+            await c.message.answer(text_out, reply_markup=kb.as_markup())
+        except Exception as e:
+            logging.error(f"Error sending question list: {e}")
 
-    await c.message.answer("--- Конец списка вопросов ---")
+@dp.callback_query(F.data.startswith("adm_del_q_"))
+async def adm_del_q(c: types.CallbackQuery):
+    await c.answer()
+    _, _, _, q_id = c.data.split("_")
+    delete_question(int(q_id))
+    await c.message.edit_text(f"❌ Вопрос (ID: {q_id}) удален из базы.")
 
+
+@dp.callback_query(F.data == "adm_clear_q")
+async def adm_clear_q_confirm(c: types.CallbackQuery):
+    await c.answer()
+    kb = InlineKeyboardBuilder()
+    kb.add(types.InlineKeyboardButton(text="🔥 ПОДТВЕРДИТЬ ОЧИСТКУ", callback_data="adm_clear_q_do"))
+    await c.message.answer("⚠️ Вы уверены, что хотите **полностью очистить** таблицу вопросов?", parse_mode="Markdown", reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data == "adm_clear_q_do")
+async def adm_clear_q_do(c: types.CallbackQuery):
+    await c.answer()
+    clear_questions()
+    await c.message.edit_text("✅ Все вопросы удалены.")
+
+
+@dp.callback_query(F.data == "adm_clear_u")
+async def adm_clear_u_confirm(c: types.CallbackQuery):
+    await c.answer()
+    kb = InlineKeyboardBuilder()
+    kb.add(types.InlineKeyboardButton(text="🔥 ПОДТВЕРДИТЬ ОЧИСТКУ", callback_data="adm_clear_u_do"))
+    await c.message.answer("⚠️ Вы уверены, что хотите **полностью очистить** таблицы учеников и их курсов?", parse_mode="Markdown", reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data == "adm_clear_u_do")
+async def adm_clear_u_do(c: types.CallbackQuery):
+    await c.answer()
+    clear_users()
+    await c.message.edit_text("✅ Все ученики и записи на курсы удалены.")
 
 @dp.callback_query(F.data == "adm_b")
 async def adm_b(c: types.CallbackQuery, state: FSMContext):
     await c.answer()
-    await c.message.answer("Введите текст для рассылки:")
+    await c.message.answer("Введите сообщение для рассылки всем пользователям:")
     await state.set_state(Form.bc)
 
-
 @dp.message(Form.bc)
-async def bc_f(m: types.Message, state: FSMContext):
-    u = get_all_users()
-    sent_count = 0
-    for x in u:
+async def process_broadcast(m: types.Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+
+    users = get_all_users()
+    success_count = 0
+    failed_count = 0
+
+    await m.answer(f"Начинаю рассылку для {len(users)} пользователей...")
+
+    for u in users:
+        user_id = u[0]
         try:
-            await bot.send_message(x[0], m.text)
-            sent_count += 1
+            await bot.send_message(user_id, f"📢 **Сообщение от DINO CLUB:**\n\n{m.text}", parse_mode="Markdown")
+            success_count += 1
+            await asyncio.sleep(0.05) # Задержка для обхода лимитов Telegram
         except Exception as e:
-            logging.error(f"Failed to send to {x[0]}: {e}")
-    await m.answer(f"✅ Рассылка завершена! Отправлено {sent_count}/{len(u)}.")
+            failed_count += 1
+            logging.error(f"Failed to send broadcast to {user_id}: {e}")
+
+    await m.answer(f"✅ Рассылка завершена!\nУспешно отправлено: {success_count}\nНе удалось: {failed_count}")
     await state.clear()
 
 
-@dp.callback_query(F.data.startswith("adm_del_u_"))
-async def adm_del_u(c: types.CallbackQuery):
-    await c.answer("Удаление...")
-    user_id_to_delete = int(c.data.split("_")[3])
-    delete_user(user_id_to_delete)
-    await c.message.edit_text(c.message.text + "\n\n❌ **Удален.**", parse_mode="Markdown")
+# --- 7. ФУНКЦИИ УПРАВЛЕНИЯ WEBHOOK (on_startup/on_shutdown) ---
 
-
-@dp.callback_query(F.data.startswith("adm_del_q_"))
-async def adm_del_q(c: types.CallbackQuery):
-    await c.answer("Удаление...")
-    q_id_to_delete = int(c.data.split("_")[3])
-    delete_question(q_id_to_delete)
-    await c.message.edit_text(c.message.text + "\n\n🗑 **Удален.**", parse_mode="Markdown")
-
-
-@dp.callback_query(F.data == "adm_clear_q")
-async def adm_clear_q(c: types.CallbackQuery):
-    await c.answer()
-    clear_questions()
-    await c.message.answer("🗑 Все вопросы очищены.")
-
-
-@dp.callback_query(F.data == "adm_clear_u")
-async def adm_clear_u(c: types.CallbackQuery):
-    await c.answer()
-    clear_users()
-    await c.message.answer("❌ Все ученики и записи очищены.")
-
-# ----------------------------------------------------------------------
-# --- 6. ЗАПУСК ПРИЛОЖЕНИЯ (ЛОГИКА WEBHOOK/GUNICORN) ---
-# ----------------------------------------------------------------------
-
-# 1. Контекстный менеджер для установки/удаления Webhook
-@asynccontextmanager
-async def webhook_life_span(dispatcher: Dispatcher, bot: Bot):
-    # Инициализация DB
-    init_db()
-    
-    if WEBHOOK_URL:
-        # Установка Webhook при запуске
-        logging.info(f"Установка Webhook: {WEBHOOK_URL}")
-        await bot.set_webhook(url=WEBHOOK_URL, allowed_updates=dispatcher.resolve_used_update_types())
+async def on_startup(dispatcher: Dispatcher, bot: Bot, base_url: str):
+    """Устанавливает веб-хук при запуске приложения."""
+    if base_url:
+        full_webhook_url = f"{base_url}{WEBHOOK_PATH}"
+        await bot.set_webhook(full_webhook_url)
+        logging.info(f"✅ Webhook set to: {full_webhook_url}")
     else:
-        # Локальный режим, если нет публичного URL (для теста)
-        logging.warning("Нет публичного URL. Запуск в режиме Long Polling (только для локальной отладки).")
-        asyncio.create_task(dispatcher.start_polling(bot))
-    
-    yield # Ожидание работы
+        logging.warning("⚠️ BASE_WEBHOOK_URL is not set. Running in Polling mode if __main__ is executed.")
 
-    # Удаление Webhook при завершении работы (при остановке Gunicorn)
-    if WEBHOOK_URL:
-        await bot.delete_webhook()
-        logging.info("Webhook удален.")
+async def on_shutdown(dispatcher: Dispatcher, bot: Bot):
+    """Удаляет веб-хук при остановке приложения."""
+    await bot.delete_webhook()
+    logging.info("❌ Webhook deleted.")
+    await bot.session.close()
 
 
-# 2. Создание Aiohttp приложения для Gunicorn
-def init_app():
-    # Настройка Webhook-роутера для aiohttp
-    webhook_request_handler = dp.get_web_app_factory()
+# --- 8. ИНИЦИАЛИЗАЦИЯ AIOHTTP/WEBHOOK (init_app) ---
+
+def init_app() -> web.Application:
+    """
+    Создает и настраивает AIOHTTP-приложение для обработки веб-хуков.
+    """
+    app = web.Application()
+
+    # 1. Создание обработчика запросов aiogram
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+    )
+
+    # 2. Установка маршрута для веб-хука (POST-запросы)
+    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+
+    # 3. Привязка функций запуска/остановки
+    # Используем BASE_WEBHOOK_URL для установки хука при запуске Gunicorn
+    app.on_startup.append(lambda a: on_startup(dp, bot, BASE_WEBHOOK_URL))
+    app.on_shutdown.append(lambda a: on_shutdown(dp, bot))
     
-    # Применяем life_span к Dispatcher
-    webhook_request_handler.__self__.startup_lifespan = webhook_life_span(dp, bot)
+    # Добавляем простой health check (GET-запрос к корню) для Render
+    async def health_check(request):
+        return web.Response(text="OK")
+    app.router.add_get("/", health_check)
+
+    # 4. Настройка приложения
+    setup_application(app, dp, bot=bot)
     
-    # Назначаем роутер на путь, который будет слушать Gunicorn
-    webhook_request_handler.__self__.webhook_path = WEBHOOK_PATH
-    
-    # Назначаем сам бот для использования в хендлере
-    webhook_request_handler.__self__.bot = bot
-    
-    return webhook_request_handler
+    return app
 
 
-# 3. Класс, который Gunicorn использует для запуска приложения
-class StandaloneApplication(BaseApplication):
+# --- 9. GUNICORN AIOHTTP INTEGRATION ---
+
+class GunicornApplication(BaseApplication):
+    """Класс для интеграции AIOHTTP-приложения с Gunicorn."""
+
     def __init__(self, app, options=None):
         self.options = options or {}
         self.application = app
@@ -880,32 +909,36 @@ class StandaloneApplication(BaseApplication):
 
     def load_config(self):
         config = {
-            key: value
-            for key, value in self.options.items()
+            key: value for key, value in self.options.items()
             if key in self.cfg.settings and value is not None
         }
         for key, value in config.items():
             self.cfg.set(key.lower(), value)
 
     def load(self):
+        # Возвращаем aiohttp.web.Application, которую будет запускать GunicornWorker
         return self.application
 
-# 4. Главный объект, который запускает Gunicorn
-# ЭТО 'bot_app:application' в вашем Procfile!
+# --- 10. ЗАПУСК ПРИЛОЖЕНИЯ ---
+
+# Главная переменная 'application', на которую будет ссылаться Gunicorn
 application = init_app()
 
-if __name__ == '__main__':
-    # Эта часть для локального запуска (если нет WEBHOOK_URL), 
-    # на Render не используется, так как Gunicorn вызывает application()
-    if WEBHOOK_URL:
-        web.run_app(application, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
+if __name__ == "__main__":
+    init_db()
+    
+    if not WEBHOOK_URL:
+        # Режим Polling (для локального теста)
+        logging.info("Starting bot in Polling mode...")
+        dp.run_polling(bot)
     else:
-        # Для локальной отладки Long Polling
-        async def main_polling():
-            init_db()
-            await dp.start_polling(bot)
-        asyncio.run(main_polling())
-
-# ----------------------------------------------------------------------
-# --- ФИНАЛЬНЫЙ ШАГ ---
-# ----------------------------------------------------------------------
+        # Режим Webhook (запускается Gunicorn'ом на Render)
+        logging.info("Starting bot in Webhook mode (Gunicorn handles execution).")
+        # Если вы хотите запустить локально в режиме веб-хука БЕЗ Gunicorn,
+        # раскомментируйте код ниже:
+        # from aiohttp import web
+        # web.run_app(
+        #     application,
+        #     host=WEB_SERVER_HOST,
+        #     port=WEB_SERVER_PORT,
+        # )
