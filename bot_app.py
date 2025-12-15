@@ -7,18 +7,36 @@ import json
 import os
 import sys
 
-# --- 1. КОНФИГУРАЦИЯ И КОНСТАНТЫ (Замените на свои реальные данные) ---
+# --- НОВЫЕ ИМПОРТЫ ДЛЯ WEBHOOK/RENDER ---
+from contextlib import asynccontextmanager
+from aiohttp import web
+from gunicorn.app.base import BaseApplication
+from aiogram.fsm.storage.memory import MemoryStorage # Добавлен для FSM
+# ----------------------------------------
+
+# --- 1. КОНФИГУРАЦИЯ И КОНСТАНТЫ ---
 
 # !!! ВАЖНО: ЗАМЕНИТЕ ЭТИ ЗНАЧЕНИЯ !!!
-API_TOKEN = '8483546485:AAEtBnI8QDW07CgHbHXoapLYov1ELwORjeA' # ВАШ ТОКЕН
-ADMIN_ID = 752078351  # ВАШ ID
+# API_TOKEN должен быть получен из ENV на Render, но оставляем для локального теста
+API_TOKEN = os.getenv("BOT_TOKEN", '8483546485:AAEtBnI8QDW07CgHbHXoapLYov1ELwORjeA') # ВАШ ТОКЕН
+ADMIN_ID = 752078351 # ВАШ ID
 ADMIN_USERNAME = "@Dina_Di_Ru"
 CONTACT_PHONES = ["+998972488886", "+998975690286"]
 DB_NAME = 'dino_club.db'
 LOCATION_COORDS = {'latitude': 40.4979864, 'longitude': 68.7777999}
-PHONE_REGEX = re.compile(r'^\+?\d{9,15}$') 
+PHONE_REGEX = re.compile(r'^\+?\d{9,15}$')
 
-# --- 2. БАЗА ДАННЫХ ---
+# --- КОНСТАНТЫ ДЛЯ WEBHOOK (Render) ---
+WEB_SERVER_HOST = "0.0.0.0"
+# Render автоматически устанавливает PORT
+WEB_SERVER_PORT = int(os.environ.get("PORT", 8080))
+WEBHOOK_PATH = "/webhook"
+# Полный URL будет формироваться на Render
+BASE_WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL") 
+WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}" if BASE_WEBHOOK_URL else None
+# ----------------------------------------
+
+# --- 2. БАЗА ДАННЫХ (БЕЗ ИЗМЕНЕНИЙ) ---
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -70,7 +88,7 @@ def save_question(user_id, text):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('INSERT INTO questions (user_id, question_text, date) VALUES (?, ?, ?)',
-                   (user_id, text, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                    (user_id, text, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
 
@@ -130,15 +148,16 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramBadRequest
 
+# Инициализация диспетчера с хранилищем (обязательно для FSM)
+dp = Dispatcher(storage=MemoryStorage())
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
 
 # ИСПРАВЛЕННЫЙ БЛОК ТЕКСТОВ: Все узбекские строки с апострофами обернуты в ДВОЙНЫЕ кавычки
 STRINGS = {
     'ru': {
         'menu': 'Выберите действие:', 'sub': '📚 Курсы', 'reg': '📞 Регистрация',
         'cab': '👤 Кабинет', 'ask': '❓ Вопрос', 'loc': '📍 Локация', 'res': '🏆 Результаты', 'tst': '📝 Тест',
-        'back': '⬅️ Назад', 'cat': 'Направление:', 'fio': 'Введите ФИО:', 
+        'back': '⬅️ Назад', 'cat': 'Направление:', 'fio': 'Введите ФИО:',
         'tel': 'Введите телефон (например: +998901234567):', 'tel_error': '❌ Неверный формат телефона. Пожалуйста, введите корректный номер, например: +998901234567',
         'saved': '✅ Сохранено!', 'select_course': 'Выберите направление для записи:',
         'contact': '📞 Связь',
@@ -152,19 +171,19 @@ STRINGS = {
     'uzb': {
         'menu': "Harakatni tanlang:", 'sub': "📚 Kurslar", 'reg': "📞 Ro'yxatdan o'tish",
         'cab': "👤 Kabinet", 'ask': "❓ Savol", 'loc': "📍 Manzil", 'res': "🏆 Natijalar", 'tst': "📝 Test",
-        'back': "⬅️ Orqaga", 'cat': "Yo’nalish:", 'fio': "F.I.SH. kiriting:", 
+        'back': "⬅️ Orqaga", 'cat': "Yo’nalish:", 'fio': "F.I.SH. kiriting:",
         'tel': "Telefonni kiriting (masalan: +998901234567):", 'tel_error': "❌ Noto'g'ri telefon formati. Iltimos, to'g'ri raqam kiriting, masalan: +998901234567",
         'saved': "✅ Saqlandi!",
         'loc_text': "📍 Biz bu yerda joylashganmiz (Google Xarita havolasi): [Manzil]",
         'select_course': "Ro'yxatdan o'tish uchun kursni tanlang:",
         'contact': "📞 Kontakt",
-        'reg_already': "Men allaqachon Dino Clubda o'qiyman", 
-        'reg_new': "Men hali o'qimayman, lekin rejalashtirmoqdaman", 
+        'reg_already': "Men allaqachon Dino Clubda o'qiyman",
+        'reg_new': "Men hali o'qimayman, lekin rejalashtirmoqdaman",
         'reg_prompt': "Iltimos, holatingizni tanlang:",
         'fio_msg_already': "Ma'lumotlaringizni yangilash uchun to'liq F.I.SH.ingizni kiriting:",
         'fio_msg_new': "Boshlang'ich ro'yxatdan o'tish uchun to'liq F.I.SH.ingizni kiriting:",
         'schedule_header': "Kurs bo'yicha dars jadvali:",
-        'reg_complete': "Ro'yxatdan o'tish yakunlandi! Siz kursga yozildingiz:" 
+        'reg_complete': "Ro'yxatdan o'tish yakunlandi! Siz kursga yozildingiz:"
     }
 }
 
@@ -318,8 +337,8 @@ async def route(c: types.CallbackQuery, state: FSMContext):
 
     elif act == "loc":
         await bot.send_location(c.message.chat.id, 
-                                latitude=LOCATION_COORDS['latitude'], 
-                                longitude=LOCATION_COORDS['longitude'])
+                                 latitude=LOCATION_COORDS['latitude'], 
+                                 longitude=LOCATION_COORDS['longitude'])
 
         text = (
             "📍 **Мы находимся здесь:**\n"
@@ -331,13 +350,11 @@ async def route(c: types.CallbackQuery, state: FSMContext):
 
     elif act == "ask":
         await state.update_data(l=lang)
-        # ИСПРАВЛЕНО
         await c.message.answer(
             "❓ Введите ваш анонимный вопрос:" if lang == 'ru' else "❓ Anonim savolingizni kiriting:")
         await state.set_state(Form.ask_q)
 
     elif act == "res":
-        # ИСПРАВЛЕНО
         await c.message.answer(
             "🏆 Результаты учеников и достижения: скоро здесь!" if lang == 'ru' else "🏆 O'quvchilar natijalari va yutuqlari: tez orada shu yerda bo'ladi!")
 
@@ -348,7 +365,6 @@ async def route(c: types.CallbackQuery, state: FSMContext):
             question_index=0,
             test_questions=ENGLISH_TEST_QUESTIONS
         )
-        # ИСПРАВЛЕНО
         intro_text = (
             "📝 **Начинаем тест на определение уровня английского языка!**\n\n_Выберите один правильный вариант ответа._" if lang == 'ru' else
             "📝 **Ingliz tili darajasini aniqlash testini boshlaymiz!**\n\n_Bitta to'g'ri javobni tanlang._")
@@ -390,21 +406,19 @@ async def route(c: types.CallbackQuery, state: FSMContext):
             select_prompt = "Для выбора курса нажмите '✏️ Изменить данные/курс'."
 
         else:  # uzb
+            # --- ИСПРАВЛЕНИЕ IndentationError (Блок else был без отступа) ---
             if not user_data:
-                
-
-        
-# Строка 396 в bot_app.py должна выглядеть ТОЧНО так
-await c.message.answer(f"❌ {STRINGS['uzb']['cab'].replace('👤 Kabinet', 'Siz hali ro\'yxatdan o\'tmagansiz.')} '{STRINGS['uzb']['reg']}' tugmasini bosing.",
-                         reply_markup=main_kb(lang))
+                # ВАША ИСПРАВЛЕННАЯ СТРОКА с ТЕКСТОМ и ОТСТУПОМ
+                await c.message.answer(f"❌ {STRINGS['uzb']['cab'].replace('👤 Kabinet', 'Siz hali ro\'yxatdan o\'tmagansiz.')} '{STRINGS['uzb']['reg']}' tugmasini bosing.",
+                                        reply_markup=main_kb(lang))
                 return
             
             full_name, phone, course_key = user_data
             text = f"👤 <b>Sizning shaxsiy kabinetingiz</b>\n\nIsm: {full_name}\nTelefon: {phone}\n"
             button_text = "✏️ Ma'lumotlarni/kursni o'zgartirish"
             not_selected = "❌ Tanlanmagan"
-            # ИСПРАВЛЕНО: удалены экранированные обратные слэши из узбекского текста.
             select_prompt = "Kursni tanlash uchun '✏️ Ma'lumotlarni/kursni o'zgartirish' tugmasini bosing."
+            # -----------------------------------------------------------------
 
         if course_key and course_key in SUBJECTS:
             course_name = SUBJECTS[course_key][lang]['name']
@@ -465,7 +479,7 @@ async def get_phone(m: types.Message, state: FSMContext):
     
     if not PHONE_REGEX.match(m.text):
         await m.answer(STRINGS[lang]['tel_error'])
-        return 
+        return
 
     save_user(m.from_user.id, data['n'], m.text)
 
@@ -496,7 +510,8 @@ async def enroll_course(c: types.CallbackQuery, state: FSMContext):
     course_name = SUBJECTS[course_key][lang]['name']
     
     user_data = get_user_data(c.from_user.id)
-    name, phone, _ = user_data if user_data else ("Неизвестно", "Неизвестно")
+    # Исправление: если user_data нет (хотя не должно быть), даем значения по умолчанию
+    name, phone, _ = user_data if user_data else ("Неизвестно", "Неизвестно", None)
 
     await bot.send_message(
         ADMIN_ID, 
@@ -531,7 +546,6 @@ async def process_ask(m: types.Message, state: FSMContext):
         f"Текст: {m.text}", 
         parse_mode="Markdown")
     
-    # ИСПРАВЛЕНО
     lang = (await state.get_data())['l']
     await m.answer("✅ OK! Ваш вопрос передан администратору." if lang == 'ru' else "✅ OK! Savolingiz administratorga yuborildi.")
     await state.clear()
@@ -550,7 +564,6 @@ async def show_cat(c: types.CallbackQuery):
                 text=f"👨‍🏫 {t['n']}", 
                 callback_data=f"det_{key}_{i}_{lang}"))
     else:
-        # ИСПРАВЛЕНО
         text = (f"По направлению {SUBJECTS[key][lang]['name']} пока нет данных. Выберите другой язык или направление." 
                 if lang == 'ru' else 
                 f"{SUBJECTS[key][lang]['name']} yo'nalishi bo'yicha ma'lumot yo'q. Boshqa yo'nalishni tanlang.")
@@ -594,7 +607,7 @@ async def show_det(c: types.CallbackQuery):
         await c.message.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
 
 
-# --- ОБРАБОТЧИКИ ТЕСТА (ВСЕ УЗБЕКСКИЕ СТРОКИ ИСПРАВЛЕНЫ) ---
+# --- ОБРАБОТЧИКИ ТЕСТА (БЕЗ ИЗМЕНЕНИЙ) ---
 
 async def ask_test_question(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -615,11 +628,10 @@ async def ask_test_question(message: types.Message, state: FSMContext):
     option_names = ['A', 'B', 'C', 'D']
     for i, option in enumerate(options):
         kb.add(types.InlineKeyboardButton(text=f"{option_names[i]}) {option}",
-                                          callback_data=f"test_q_{q_index}_{i}"))
+                                             callback_data=f"test_q_{q_index}_{i}"))
 
     kb.adjust(2)
 
-    # ИСПРАВЛЕННАЯ F-СТРОКА: узбекский текст обернут в двойные кавычки
     await message.answer(
         f"**{('Вопрос' if lang == 'ru' else 'Savol')} {q_index + 1}/{len(questions)}:**\n`{question_text}`",
         reply_markup=kb.as_markup(), parse_mode="Markdown")
@@ -642,7 +654,6 @@ async def process_test_answer(c: types.CallbackQuery, state: FSMContext):
     correct_answer_index = questions[q_index_answered][2]
 
     try:
-        # ИСПРАВЛЕННАЯ F-СТРОКА: узбекский текст обернут в двойные кавычки
         if answer_index == correct_answer_index:
             current_score += 1
             await c.message.edit_text(c.message.text + (
@@ -670,23 +681,19 @@ async def finish_test(message: types.Message, state: FSMContext):
 
     if final_score <= 5:
         level = "Beginner/Elementary (A1/A2)"
-        # ИСПРАВЛЕНО: узбекский текст обернут в двойные кавычки
         recommendation = ("Вам необходима сильная базовая программа для изучения основ. Начните с нашего общего курса для начинающих!" if lang == 'ru' else
                           "Sizga asoslarni o'rganish uchun kuchli boshlang'ich dastur kerak. Yangi boshlanuvchilar uchun umumiy kursimizdan boshlang!")
     elif final_score <= 10:
         level = "Pre-Intermediate (A2/B1)"
-        # ИСПРАВЛЕНО: узбекский текст обернут в двойные кавычки
         recommendation = ("У вас есть хорошие базовые знания. Рекомендуем курс для среднего уровня." if lang == 'ru' else
                           "Unda yaxshi asosiy bilimlar bor. O'rta darajadagi kursni tavsiya qilamiz.")
     else:
         level = "Intermediate (B1) или выше"
-        # ИСПРАВЛЕНО: узбекский текст обернут в двойные кавычки
         recommendation = ("Отличный результат! Вы можете попробовать курс подготовки к IELTS." if lang == 'ru' else
                           "Ajoyib natija! Siz IELTS ga tayyorgarlik kursini sinab ko'rishingiz mumkin.")
     
-    # ИСПРАВЛЕННЫЙ БЛОК F-СТРОК: узбекский текст обернут в двойные кавычки
     result_text = (
-        f"🎉 **{('Тест завершен!' if lang == 'ru' else \"Test yakunlandi!\")}**\n"
+        f"🎉 **{('Тест завершен!' if lang == 'ru' else 'Test yakunlandi!')}**\n"
         f"{('Ваш результат:' if lang == 'ru' else \"Sizning taxminiy darajangiz (aniq emas):\")} **{final_score} из {total_questions}** {('правильных ответов.' if lang == 'ru' else \"to'g'ri javob.\")}\n\n"
         f"📊 **{('Ваш примерный уровень (неточный):' if lang == 'ru' else \"Sizning darajangiz (aniq emas):\")}** {level}\n"
         f"💡 **{('Рекомендация:' if lang == 'ru' else \"Tavsiya:\")}** {recommendation}\n\n"
@@ -699,7 +706,7 @@ async def finish_test(message: types.Message, state: FSMContext):
     await message.answer(s['menu'], reply_markup=main_kb(lang))
 
 
-# --- ОБРАБОТЧИКИ АДМИНА (без изменений) ---
+# --- ОБРАБОТЧИКИ АДМИНА ---
 
 @dp.message(Command("admin"))
 async def admin(m: types.Message):
@@ -776,107 +783,112 @@ async def bc_f(m: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("adm_del_u_"))
 async def adm_del_u(c: types.CallbackQuery):
-    await c.answer()
-    try:
-        user_id = int(c.data.split("_")[3])
-        delete_user(user_id)
-        await c.message.edit_text(c.message.text + "\n\n**✅ УДАЛЕНО**", parse_mode="Markdown")
-    except Exception as e:
-        await c.message.answer(f"❌ Ошибка удаления: {e}")
+    await c.answer("Удаление...")
+    user_id_to_delete = int(c.data.split("_")[3])
+    delete_user(user_id_to_delete)
+    await c.message.edit_text(c.message.text + "\n\n❌ **Удален.**", parse_mode="Markdown")
 
 
 @dp.callback_query(F.data.startswith("adm_del_q_"))
 async def adm_del_q(c: types.CallbackQuery):
-    await c.answer()
-    try:
-        q_id = int(c.data.split("_")[3])
-        delete_question(q_id)
-        await c.message.edit_text(c.message.text + "\n\n**✅ УДАЛЕНО**", parse_mode="Markdown")
-    except Exception as e:
-        await c.message.answer(f"❌ Ошибка удаления: {e}")
+    await c.answer("Удаление...")
+    q_id_to_delete = int(c.data.split("_")[3])
+    delete_question(q_id_to_delete)
+    await c.message.edit_text(c.message.text + "\n\n🗑 **Удален.**", parse_mode="Markdown")
 
 
 @dp.callback_query(F.data == "adm_clear_q")
 async def adm_clear_q(c: types.CallbackQuery):
     await c.answer()
     clear_questions()
-    await c.message.answer("✅ Все вопросы удалены.")
+    await c.message.answer("🗑 Все вопросы очищены.")
 
 
 @dp.callback_query(F.data == "adm_clear_u")
 async def adm_clear_u(c: types.CallbackQuery):
     await c.answer()
     clear_users()
-    await c.message.answer("✅ Все ученики и записи на курсы удалены.")
+    await c.message.answer("❌ Все ученики и записи очищены.")
 
+# ----------------------------------------------------------------------
+# --- 6. ЗАПУСК ПРИЛОЖЕНИЯ (ЛОГИКА WEBHOOK/GUNICORN) ---
+# ----------------------------------------------------------------------
 
-# --- 6. ЗАПУСК БОТА (Webhooks для PythonAnywhere / Render) ---
-
-# Инициализация асинхронного цикла и базы данных
-init_db()
-# Создаем один глобальный цикл (loop) для переиспользования
-try:
-    loop = asyncio.get_event_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-# Функция, которую вызывает WSGI-файл (Render использует Gunicorn с UvicornWorker)
-def application(environ, start_response):
+# 1. Контекстный менеджер для установки/удаления Webhook
+@asynccontextmanager
+async def webhook_life_span(dispatcher: Dispatcher, bot: Bot):
+    # Инициализация DB
+    init_db()
     
-    # Этот код обрабатывает входящие Webhook-запросы
+    if WEBHOOK_URL:
+        # Установка Webhook при запуске
+        logging.info(f"Установка Webhook: {WEBHOOK_URL}")
+        await bot.set_webhook(url=WEBHOOK_URL, allowed_updates=dispatcher.resolve_used_update_types())
+    else:
+        # Локальный режим, если нет публичного URL (для теста)
+        logging.warning("Нет публичного URL. Запуск в режиме Long Polling (только для локальной отладки).")
+        asyncio.create_task(dispatcher.start_polling(bot))
     
-    path = os.path.dirname(__file__) 
+    yield # Ожидание работы
+
+    # Удаление Webhook при завершении работы (при остановке Gunicorn)
+    if WEBHOOK_URL:
+        await bot.delete_webhook()
+        logging.info("Webhook удален.")
+
+
+# 2. Создание Aiohttp приложения для Gunicorn
+def init_app():
+    # Настройка Webhook-роутера для aiohttp
+    webhook_request_handler = dp.get_web_app_factory()
     
-    if environ['REQUEST_METHOD'] == 'POST':
-        
-        try:
-            request_body_size = int(environ.get('CONTENT_LENGTH', 0))
-            request_body = environ['wsgi.input'].read(request_body_size)
-        except Exception:
-            request_body = b'{}'
-            
-        try:
-            data = json.loads(request_body)
-            update = types.Update.model_validate(data)
-            
-            # Используем глобальный цикл для обработки обновления
-            # Примечание: aiogram 3+ требует, чтобы мы подали update в dp.feed_update
-            loop.run_until_complete(dp.feed_update(bot, update))
-            
-            status = '200 OK'
-            response_headers = [('Content-type', 'text/plain')]
-            start_response(status, response_headers)
-            return [b'ok'] 
-            
-        except Exception as e:
-            # Логирование ошибок в файл
-            error_msg = f"Error processing update: {e}\n{request_body.decode('utf-8', 'ignore')}\n\n"
-            # Для Render лучше логировать в stdout/stderr, но для PythonAnywhere файл лучше:
-            # with open(os.path.join(path, 'webhook_error_log.txt'), 'a') as f:
-            #     f.write(error_msg)
-            logging.error(error_msg)
-            
-            status = '500 Internal Server Error'
-            response_headers = [('Content-type', 'text/plain')]
-            start_response(status, response_headers)
-            return [b'error']
+    # Применяем life_span к Dispatcher
+    webhook_request_handler.__self__.startup_lifespan = webhook_life_span(dp, bot)
+    
+    # Назначаем роутер на путь, который будет слушать Gunicorn
+    webhook_request_handler.__self__.webhook_path = WEBHOOK_PATH
+    
+    # Назначаем сам бот для использования в хендлере
+    webhook_request_handler.__self__.bot = bot
+    
+    return webhook_request_handler
 
-    # Для GET-запросов (проверка работоспособности)
-    status = '200 OK'
-    response_headers = [('Content-type', 'text/plain')]
-    start_response(status, response_headers)
-    return [b'Dino Club Bot is running (Webhook mode).']
 
-# Этот блок остался для локального запуска, если он понадобится.
-if __name__ == "__main__":
-    async def local_main():
-        logging.info("Starting bot in Polling mode (local).")
-        await dp.start_polling(bot)
-        
-    try:
-        loop.run_until_complete(local_main())
-    except KeyboardInterrupt:
-        logging.info("Bot stopped by user.")
-    except Exception as e:
-        logging.error(f"An error occurred: {e}")
+# 3. Класс, который Gunicorn использует для запуска приложения
+class StandaloneApplication(BaseApplication):
+    def __init__(self, app, options=None):
+        self.options = options or {}
+        self.application = app
+        super().__init__()
+
+    def load_config(self):
+        config = {
+            key: value
+            for key, value in self.options.items()
+            if key in self.cfg.settings and value is not None
+        }
+        for key, value in config.items():
+            self.cfg.set(key.lower(), value)
+
+    def load(self):
+        return self.application
+
+# 4. Главный объект, который запускает Gunicorn
+# ЭТО 'bot_app:application' в вашем Procfile!
+application = init_app()
+
+if __name__ == '__main__':
+    # Эта часть для локального запуска (если нет WEBHOOK_URL), 
+    # на Render не используется, так как Gunicorn вызывает application()
+    if WEBHOOK_URL:
+        web.run_app(application, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
+    else:
+        # Для локальной отладки Long Polling
+        async def main_polling():
+            init_db()
+            await dp.start_polling(bot)
+        asyncio.run(main_polling())
+
+# ----------------------------------------------------------------------
+# --- ФИНАЛЬНЫЙ ШАГ ---
+# ----------------------------------------------------------------------
