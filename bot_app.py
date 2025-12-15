@@ -391,7 +391,8 @@ async def route(c: types.CallbackQuery, state: FSMContext):
 
         else:  # uzb
             if not user_data:
-                # ИСПРАВЛЕНО: удалены экранированные обратные слэши из узбекского текста.
+                
+
         
 # Строка 396 в bot_app.py должна выглядеть ТОЧНО так
 await c.message.answer(f"❌ {STRINGS['uzb']['cab'].replace('👤 Kabinet', 'Siz hali ro\'yxatdan o\'tmagansiz.')} '{STRINGS['uzb']['reg']}' tugmasini bosing.",
