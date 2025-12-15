@@ -672,6 +672,10 @@ async def process_test_answer(c: types.CallbackQuery, state: FSMContext):
     await ask_test_question(c.message, state)
 
 
+# --- ИСПРАВЛЕННЫЕ ОБРАБОТЧИКИ ТЕСТА ---
+
+# ... (остальной код) ...
+
 async def finish_test(message: types.Message, state: FSMContext):
     data = await state.get_data()
     final_score = data['test_score']
@@ -692,18 +696,31 @@ async def finish_test(message: types.Message, state: FSMContext):
         recommendation = ("Отличный результат! Вы можете попробовать курс подготовки к IELTS." if lang == 'ru' else
                           "Ajoyib natija! Siz IELTS ga tayyorgarlik kursini sinab ko'rishingiz mumkin.")
     
+    # --- ИСПРАВЛЕННЫЙ БЛОК: Устранено использование слэшей и вложенных кавычек в f-строке ---
+    
+    # Определяем основные переменные для текста
+    header = "Тест завершен!" if lang == 'ru' else "Test yakunlandi!"
+    result_label = "Ваш результат:" if lang == 'ru' else "Sizning taxminiy darajangiz (aniq emas):"
+    correct_answers_text = "правильных ответов." if lang == 'ru' else "to'g'ri javob."
+    level_label = "Ваш примерный уровень (неточный):" if lang == 'ru' else "Sizning darajangiz (aniq emas):"
+    rec_label = "Рекомендация:" if lang == 'ru' else "Tavsiya:"
+    footer_text = f"Чтобы записаться, нажмите '📞 {s['reg']}' в главном меню." if lang == 'ru' else f"Ro'yxatdan o'tish uchun bosing '📞 {s['reg']}' asosiy menyuda."
+    
     result_text = (
-        f"🎉 **{('Тест завершен!' if lang == 'ru' else 'Test yakunlandi!')}**\n"
-        f"{('Ваш результат:' if lang == 'ru' else \"Sizning taxminiy darajangiz (aniq emas):\")} **{final_score} из {total_questions}** {('правильных ответов.' if lang == 'ru' else \"to'g'ri javob.\")}\n\n"
-        f"📊 **{('Ваш примерный уровень (неточный):' if lang == 'ru' else \"Sizning darajangiz (aniq emas):\")}** {level}\n"
-        f"💡 **{('Рекомендация:' if lang == 'ru' else \"Tavsiya:\")}** {recommendation}\n\n"
-        f"{('Чтобы записаться, нажмите' if lang == 'ru' else \"Ro'yxatdan o'tish uchun bosing\")} '📞 {s['reg']}' {('в главном меню.' if lang == 'ru' else \"asosiy menyuda.\")}"
+        f"🎉 **{header}**\n"
+        f"{result_label} **{final_score} из {total_questions}** {correct_answers_text}\n\n"
+        f"📊 **{level_label}** {level}\n"
+        f"💡 **{rec_label}** {recommendation}\n\n"
+        f"{footer_text}"
     )
+    # ----------------------------------------------------------------------------------------
 
     await message.answer(result_text, parse_mode="Markdown")
 
     await state.clear()
     await message.answer(s['menu'], reply_markup=main_kb(lang))
+
+# ... (остальной код) ...
 
 
 # --- ОБРАБОТЧИКИ АДМИНА ---
