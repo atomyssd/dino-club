@@ -20,7 +20,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 # --- 1. КОНФИГУРАЦИЯ И КОНСТАНТЫ ---
 
@@ -43,7 +43,7 @@ WEB_SERVER_HOST = "0.0.0.0"
 WEB_SERVER_PORT = int(os.environ.get("PORT", 8080))
 WEBHOOK_PATH = "/webhook"
 # Полный URL будет формироваться на Render
-BASE_WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL") 
+BASE_WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")
 WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}" if BASE_WEBHOOK_URL else None
 # ----------------------------------------
 
@@ -99,7 +99,7 @@ def save_question(user_id, text):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('INSERT INTO questions (user_id, question_text, date) VALUES (?, ?, ?)',
-                    (user_id, text, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                     (user_id, text, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
 
@@ -307,19 +307,27 @@ async def start(m: types.Message):
 @dp.callback_query(F.data.startswith("lang_"))
 async def set_lang(c: types.CallbackQuery):
     lang = c.data.split("_")[1]
+    # Очищаем состояние, если пользователь переключает язык
+    await dp.storage.storage.storage[c.from_user.id].clear()
+    
     try:
         await c.message.edit_text(STRINGS[lang]['menu'], reply_markup=main_kb(lang))
     except TelegramBadRequest:
+        # Если сообщение не может быть отредактировано (слишком старое), отправляем новое
         await c.message.answer(STRINGS[lang]['menu'], reply_markup=main_kb(lang))
 
 
 @dp.callback_query(F.data.startswith("nav_"))
 async def route(c: types.CallbackQuery, state: FSMContext):
     await c.answer()
+    await state.clear() # Очистка состояния перед началом новой навигации
     _, act, lang = c.data.split("_")
     s = STRINGS[lang]
 
     if act == "reg":
+        # Очистка состояния перед входом в Регистрацию
+        await state.clear() 
+        
         kb = InlineKeyboardBuilder()
         kb.row(types.InlineKeyboardButton(text=s['reg_already'], callback_data=f"reg_type_already_{lang}"))
         kb.row(types.InlineKeyboardButton(text=s['reg_new'], callback_data=f"reg_type_new_{lang}"))
@@ -340,15 +348,20 @@ async def route(c: types.CallbackQuery, state: FSMContext):
             await c.message.answer(s['cat'], reply_markup=kb.as_markup())
 
     elif act == "loc":
-        await bot.send_location(c.message.chat.id, 
-                                latitude=LOCATION_COORDS['latitude'], 
-                                longitude=LOCATION_COORDS['longitude'])
+        # Отправляем локацию, а затем сообщение с картой.
+        try:
+            await bot.send_location(c.message.chat.id, 
+                                     latitude=LOCATION_COORDS['latitude'], 
+                                     longitude=LOCATION_COORDS['longitude'])
+        except Exception:
+            # Если не удалось отправить локацию (например, бот заблокирован в некоторых группах)
+            pass
 
         text = (
             "📍 **Мы находимся здесь:**\n"
-            "[Открыть в Google Maps](https://maps.app.goo.gl/izTkwcwZbA6ygBcj7)" if lang == 'ru' else
+            f"[Открыть в Google Maps](https://maps.app.goo.gl/izTkwcwZbA6ygBcj7?q={LOCATION_COORDS['latitude']},{LOCATION_COORDS['longitude']})" if lang == 'ru' else
             "📍 **Biz bu yerda joylashganmiz:**\n"
-            "[Google Xaritada ochish](https://maps.app.goo.gl/izTkwcwZbA6ygBcj7)"
+            f"[Google Xaritada ochish](https://maps.app.goo.gl/izTkwcwZbA6ygBcj7?q={LOCATION_COORDS['latitude']},{LOCATION_COORDS['longitude']})"
         )
         await c.message.answer(text, parse_mode="Markdown")
 
@@ -363,6 +376,9 @@ async def route(c: types.CallbackQuery, state: FSMContext):
             "🏆 Результаты учеников и достижения: скоро здесь!" if lang == 'ru' else "🏆 O'quvchilar natijalari va yutuqlari: tez orada shu yerda bo'ladi!")
 
     elif act == "tst":
+        # Очистка состояния перед началом Теста
+        await state.clear() 
+        
         await state.update_data(
             l=lang,
             test_score=0,
@@ -374,10 +390,13 @@ async def route(c: types.CallbackQuery, state: FSMContext):
             "📝 **Ingliz tili darajasini aniqlash testini boshlaymiz!**\n\n_Bitta to'g'ri javobni tanlang._")
 
         try:
+            # Редактируем сообщение для начала теста
             await c.message.edit_text(intro_text, parse_mode="Markdown")
         except TelegramBadRequest:
+            # Если сообщение не может быть отредактировано, отправляем новое
             await c.message.answer(intro_text, parse_mode="Markdown")
         
+        # Запускаем первый вопрос
         await ask_test_question(c.message, state)
 
     elif act == "contact":
@@ -389,11 +408,21 @@ async def route(c: types.CallbackQuery, state: FSMContext):
             "По всем вопросам записи, расписания и оплаты:\n\n" if lang == 'ru' else
             "Ro'yxatdan o'tish, dars jadvali va to'lov masalalari bo'yicha:\n\n"
         )
-        text += f"👤 **Telegram:** {ADMIN_USERNAME}\n"
+        # ИСПРАВЛЕНИЕ: Делаем юзернейм кликабельным (Markdown-ссылка)
+        admin_link = f"https://t.me/{ADMIN_USERNAME.strip('@')}"
+        text += f"👤 **Telegram:** [{ADMIN_USERNAME}]({admin_link})\n"
+        
+        # Форматирование номеров
         for i, phone in enumerate(CONTACT_PHONES, 1):
-            text += f"📱 **Телефон {i}:** [{phone}](tel:{phone})\n"
+            text += f"📱 **Телефон {i}:** [{phone}](tel:{phone.strip('+')})\n"
+            
         text += "\nМы рады вам помочь!" if lang == 'ru' else "\nSizga yordam berishdan mamnunmiz!"
-        await c.message.answer(text, parse_mode="Markdown")
+        
+        try:
+            await c.message.edit_text(text, parse_mode="Markdown")
+        except TelegramBadRequest:
+             await c.message.answer(text, parse_mode="Markdown")
+
 
     elif act == "cab":
         user_data = get_user_data(c.from_user.id)
@@ -401,7 +430,7 @@ async def route(c: types.CallbackQuery, state: FSMContext):
         if lang == 'ru':
             if not user_data:
                 await c.message.answer("❌ Вы еще не зарегистрированы. Нажмите '📞 Регистрация'.",
-                                       reply_markup=main_kb(lang))
+                                         reply_markup=main_kb(lang))
                 return
             full_name, phone, course_key = user_data
             text = f"👤 <b>Ваш Личный Кабинет</b>\n\nИмя: {full_name}\nТелефон: {phone}\n"
@@ -412,7 +441,7 @@ async def route(c: types.CallbackQuery, state: FSMContext):
         else:  # uzb
             if not user_data:
                 await c.message.answer(f"❌ Siz hali ro'yxatdan o'tmagansiz. '{STRINGS['uzb']['reg']}' tugmasini bosing.",
-                                        reply_markup=main_kb(lang))
+                                         reply_markup=main_kb(lang))
                 return
             
             full_name, phone, course_key = user_data
@@ -443,12 +472,20 @@ async def route(c: types.CallbackQuery, state: FSMContext):
 
         kb = InlineKeyboardBuilder()
         kb.row(types.InlineKeyboardButton(text=button_text, callback_data=f"nav_reg_{lang}"))
-        await c.message.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
+        
+        try:
+             await c.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
+        except TelegramBadRequest:
+             await c.message.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
 
 
 @dp.callback_query(F.data.startswith("reg_type_"))
 async def process_reg_type(c: types.CallbackQuery, state: FSMContext):
     await c.answer()
+    
+    # Очистка состояния перед началом FSM
+    await state.clear()
+    
     _, _, reg_type, lang = c.data.split("_")
     s = STRINGS[lang]
 
@@ -628,14 +665,17 @@ async def ask_test_question(message: types.Message, state: FSMContext):
 
     option_names = ['A', 'B', 'C', 'D']
     for i, option in enumerate(options):
+        # Передаем текущий индекс вопроса (q_index) в callback_data
         kb.add(types.InlineKeyboardButton(text=f"{option_names[i]}) {option}",
                                           callback_data=f"test_q_{q_index}_{i}"))
 
     kb.adjust(2)
 
+    # Используем send_message, чтобы не было конфликтов с редактированием
     await message.answer(
         f"**{('Вопрос' if lang == 'ru' else 'Savol')} {q_index + 1}/{len(questions)}:**\n`{question_text}`",
         reply_markup=kb.as_markup(), parse_mode="Markdown")
+    
     await state.set_state(Form.test_q)
 
 
@@ -653,26 +693,31 @@ async def process_test_answer(c: types.CallbackQuery, state: FSMContext):
     lang = data['l']
 
     # Проверка, что индекс вопроса соответствует текущему ожидаемому
-    if q_index_answered != data['question_index']:
-        # Если пришел ответ на старый вопрос, игнорируем
+    # Это предотвращает обработку нажатий на старые кнопки
+    if q_index_answered != data.get('question_index'):
         return
 
     correct_answer_index = questions[q_index_answered][2]
 
     try:
+        # Редактируем предыдущее сообщение с вопросом
         if answer_index == correct_answer_index:
             current_score += 1
             await c.message.edit_text(c.message.text + (
-                "\n\n✅ **Верно!**" if lang == 'ru' else "\n\n✅ **To'g'ri!**"), parse_mode="Markdown")
+                f"\n\n✅ **Верно!** (Выбран ответ: {questions[q_index_answered][1][answer_index]})" if lang == 'ru' else 
+                f"\n\n✅ **To'g'ri!** (Tanlangan javob: {questions[q_index_answered][1][answer_index]})"), parse_mode="Markdown")
         else:
             await c.message.edit_text(c.message.text + (
-                "\n\n❌ **Неверно.**" if lang == 'ru' else "\n\n❌ **Noto'g'ri.**"), parse_mode="Markdown")
+                f"\n\n❌ **Неверно.** (Правильный: {questions[q_index_answered][1][correct_answer_index]})" if lang == 'ru' else 
+                f"\n\n❌ **Noto'g'ri.** (To'g'ri: {questions[q_index_answered][1][correct_answer_index]})"), parse_mode="Markdown")
     except TelegramBadRequest:
+        # Игнорируем ошибку, если пользователь быстро нажимает или сообщение слишком старое
         pass
 
     next_index = q_index_answered + 1
     await state.update_data(test_score=current_score, question_index=next_index)
 
+    # Небольшая задержка перед отправкой следующего вопроса
     await asyncio.sleep(0.5)
 
     await ask_test_question(c.message, state)
@@ -685,6 +730,7 @@ async def finish_test(message: types.Message, state: FSMContext):
     lang = data['l']
     s = STRINGS[lang]
 
+    # ... (логика определения уровня остается прежней)
     if final_score <= 5:
         level = "Beginner/Elementary (A1/A2)"
         recommendation = ("Вам необходима сильная базовая программа для изучения основ. Начните с нашего общего курса для начинающих!" if lang == 'ru' else
@@ -699,7 +745,7 @@ async def finish_test(message: types.Message, state: FSMContext):
                           "Ajoyib natija! Siz IELTS ga tayyorgarlik kursini sinab ko'rishingiz mumkin.")
     
     header = "Тест завершен!" if lang == 'ru' else "Test yakunlandi!"
-    result_label = "Ваш результат:" if lang == 'ru' else "Sizning taxminiy darajangiz (aniq emas):"
+    result_label = "Ваш результат:" if lang == 'ru' else "To'g'ri javoblar soni:"
     correct_answers_text = "правильных ответов." if lang == 'ru' else "to'g'ri javob."
     level_label = "Ваш примерный уровень (неточный):" if lang == 'ru' else "Sizning darajangiz (aniq emas):"
     rec_label = "Рекомендация:" if lang == 'ru' else "Tavsiya:"
@@ -776,9 +822,10 @@ async def adm_q(c: types.CallbackQuery):
         kb = InlineKeyboardBuilder()
         kb.add(types.InlineKeyboardButton(text="❌ Удалить", callback_data=f"adm_del_q_{q_id}"))
         try:
-            await c.message.answer(text_out, reply_markup=kb.as_markup())
+             await c.message.answer(text_out, reply_markup=kb.as_markup())
         except Exception as e:
             logging.error(f"Error sending question list: {e}")
+
 
 @dp.callback_query(F.data.startswith("adm_del_q_"))
 async def adm_del_q(c: types.CallbackQuery):
@@ -789,156 +836,152 @@ async def adm_del_q(c: types.CallbackQuery):
 
 
 @dp.callback_query(F.data == "adm_clear_q")
-async def adm_clear_q_confirm(c: types.CallbackQuery):
-    await c.answer()
-    kb = InlineKeyboardBuilder()
-    kb.add(types.InlineKeyboardButton(text="🔥 ПОДТВЕРДИТЬ ОЧИСТКУ", callback_data="adm_clear_q_do"))
-    await c.message.answer("⚠️ Вы уверены, что хотите **полностью очистить** таблицу вопросов?", parse_mode="Markdown", reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data == "adm_clear_q_do")
-async def adm_clear_q_do(c: types.CallbackQuery):
+async def adm_clear_q(c: types.CallbackQuery):
     await c.answer()
     clear_questions()
-    await c.message.edit_text("✅ Все вопросы удалены.")
-
+    await c.message.answer("🗑 Все вопросы удалены.")
 
 @dp.callback_query(F.data == "adm_clear_u")
-async def adm_clear_u_confirm(c: types.CallbackQuery):
-    await c.answer()
-    kb = InlineKeyboardBuilder()
-    kb.add(types.InlineKeyboardButton(text="🔥 ПОДТВЕРДИТЬ ОЧИСТКУ", callback_data="adm_clear_u_do"))
-    await c.message.answer("⚠️ Вы уверены, что хотите **полностью очистить** таблицы учеников и их курсов?", parse_mode="Markdown", reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data == "adm_clear_u_do")
-async def adm_clear_u_do(c: types.CallbackQuery):
+async def adm_clear_u(c: types.CallbackQuery):
     await c.answer()
     clear_users()
-    await c.message.edit_text("✅ Все ученики и записи на курсы удалены.")
+    await c.message.answer("❌ Все ученики и записи удалены.")
+
 
 @dp.callback_query(F.data == "adm_b")
-async def adm_b(c: types.CallbackQuery, state: FSMContext):
+async def start_broadcast(c: types.CallbackQuery, state: FSMContext):
     await c.answer()
-    await c.message.answer("Введите сообщение для рассылки всем пользователям:")
+    await c.message.answer("📢 Введите текст для рассылки всем пользователям:")
     await state.set_state(Form.bc)
+
 
 @dp.message(Form.bc)
 async def process_broadcast(m: types.Message, state: FSMContext):
-    if m.from_user.id != ADMIN_ID:
-        return
-
     users = get_all_users()
     success_count = 0
-    failed_count = 0
+    fail_count = 0
 
-    await m.answer(f"Начинаю рассылку для {len(users)} пользователей...")
+    await m.answer(f"Начинаю рассылку ({len(users)} пользователей)...")
 
     for u in users:
-        user_id = u[0]
+        user_id, _, _ = u
         try:
-            await bot.send_message(user_id, f"📢 **Сообщение от DINO CLUB:**\n\n{m.text}", parse_mode="Markdown")
+            await bot.send_message(user_id, m.text, parse_mode="Markdown")
             success_count += 1
-            await asyncio.sleep(0.05) # Задержка для обхода лимитов Telegram
+            await asyncio.sleep(0.05) # Задержка для соблюдения лимитов Telegram
+        except TelegramForbiddenError:
+            # Пользователь заблокировал бота
+            fail_count += 1
+            logging.warning(f"User {user_id} blocked the bot. Deleting from DB.")
+            delete_user(user_id)
         except Exception as e:
-            failed_count += 1
-            logging.error(f"Failed to send broadcast to {user_id}: {e}")
+            # Прочие ошибки (таймауты и т.д.)
+            fail_count += 1
+            logging.error(f"Error sending message to user {user_id}: {e}")
 
-    await m.answer(f"✅ Рассылка завершена!\nУспешно отправлено: {success_count}\nНе удалось: {failed_count}")
+    await m.answer(
+        f"✅ Рассылка завершена!\n"
+        f"Успешно доставлено: {success_count}\n"
+        f"Не удалось (заблокировали/ошибка): {fail_count}"
+    )
     await state.clear()
 
 
-# --- 7. ФУНКЦИИ УПРАВЛЕНИЯ WEBHOOK (on_startup/on_shutdown) ---
+# --- 7. КОНФИГУРАЦИЯ ЗАПУСКА WEBHOOK/GUNICORN ---
 
 async def on_startup(dispatcher: Dispatcher, bot: Bot, base_url: str):
     """Устанавливает веб-хук при запуске приложения."""
+    
+    # ИСПРАВЛЕНИЕ #1: Проверка Gunicorn Worker ID для установки Webhook
+    # Только рабочий процесс с ID 1 устанавливает Webhook
+    worker_id = os.environ.get('GUNICORN_WORKER_ID')
+    if worker_id and worker_id != '1':
+        logging.info(f"Skipping Webhook setup on non-primary worker (ID: {worker_id}).")
+        return
+
     if base_url:
         full_webhook_url = f"{base_url}{WEBHOOK_PATH}"
-        await bot.set_webhook(full_webhook_url)
-        logging.info(f"✅ Webhook set to: {full_webhook_url}")
+        try:
+            # Сначала очищаем старый Webhook (если был)
+            await bot.delete_webhook()
+            await bot.set_webhook(
+                full_webhook_url,
+                # drop_pending_updates=True # Можно раскомментировать для сброса очереди
+            )
+            logging.info(f"✅ Webhook set to: {full_webhook_url}")
+        except Exception as e:
+            logging.error(f"❌ Failed to set webhook: {e}")
     else:
-        logging.warning("⚠️ BASE_WEBHOOK_URL is not set. Running in Polling mode if __main__ is executed.")
+        logging.warning("⚠️ BASE_WEBHOOK_URL is not set. Bot will only run locally (polling).")
 
 async def on_shutdown(dispatcher: Dispatcher, bot: Bot):
-    """Удаляет веб-хук при остановке приложения."""
+    """Удаляет веб-хук при завершении работы."""
+    # Удаляем Webhook только на основном процессе
+    worker_id = os.environ.get('GUNICORN_WORKER_ID')
+    if worker_id and worker_id != '1':
+        return
+        
+    logging.info("Shutting down and removing webhook...")
     await bot.delete_webhook()
-    logging.info("❌ Webhook deleted.")
-    await bot.session.close()
+    await dispatcher.storage.close()
+    logging.info("Webhook removed and storage closed.")
 
 
-# --- 8. ИНИЦИАЛИЗАЦИЯ AIOHTTP/WEBHOOK (init_app) ---
+@asynccontextmanager
+async def lifespan(app: web.Application):
+    """Контекстный менеджер для aiohttp.web.Application."""
+    await on_startup(dp, bot, BASE_WEBHOOK_URL)
+    yield
+    await on_shutdown(dp, bot)
 
-def init_app() -> web.Application:
-    """
-    Создает и настраивает AIOHTTP-приложение для обработки веб-хуков.
-    """
-    app = web.Application()
+def init_app():
+    """Инициализация aiohttp приложения."""
+    init_db()
+    
+    # 1. Создание aiohttp приложения
+    app = web.Application(loop=asyncio.get_event_loop(),
+                          middlewares=[])
 
-    # 1. Создание обработчика запросов aiogram
+    # 2. Настройка Webhook-обработчика
     webhook_requests_handler = SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
+        path=WEBHOOK_PATH,
+        # session=bot.session # aiogram 3.x обычно управляет сессией сам
     )
-
-    # 2. Установка маршрута для веб-хука (POST-запросы)
+    
+    # 3. Регистрация обработчика
     webhook_requests_handler.register(app, path=WEBHOOK_PATH)
 
-    # 3. Привязка функций запуска/остановки
-    # Используем BASE_WEBHOOK_URL для установки хука при запуске Gunicorn
-    app.on_startup.append(lambda a: on_startup(dp, bot, BASE_WEBHOOK_URL))
-    app.on_shutdown.append(lambda a: on_shutdown(dp, bot))
-    
-    # Добавляем простой health check (GET-запрос к корню) для Render
-    async def health_check(request):
-        return web.Response(text="OK")
-    app.router.add_get("/", health_check)
-
-    # 4. Настройка приложения
+    # 4. Настройка приложения (middlewares, startup/shutdown)
     setup_application(app, dp, bot=bot)
     
+    # 5. Добавление lifespan hooks (для aiogram 3.x)
+    # Используем прямой вызов вместо app.on_startup/app.on_shutdown
+    app.on_startup.append(lambda a: on_startup(dp, bot, BASE_WEBHOOK_URL))
+    app.on_shutdown.append(lambda a: on_shutdown(dp, bot))
+
+
     return app
 
+# Переменная, которую Gunicorn будет использовать для запуска
+application = init_app()
 
-# --- 9. GUNICORN AIOHTTP INTEGRATION ---
-
-class GunicornApplication(BaseApplication):
-    """Класс для интеграции AIOHTTP-приложения с Gunicorn."""
-
+# Этот класс используется Gunicorn для запуска aiohttp приложения
+class AiohttpGunicornApp(BaseApplication):
     def __init__(self, app, options=None):
         self.options = options or {}
         self.application = app
         super().__init__()
 
     def load_config(self):
-        config = {
-            key: value for key, value in self.options.items()
-            if key in self.cfg.settings and value is not None
-        }
+        config = {key: value for key, value in self.options.items()
+                  if key in self.cfg.settings and value is not None}
         for key, value in config.items():
             self.cfg.set(key.lower(), value)
 
     def load(self):
-        # Возвращаем aiohttp.web.Application, которую будет запускать GunicornWorker
         return self.application
 
-# --- 10. ЗАПУСК ПРИЛОЖЕНИЯ ---
-
-# Главная переменная 'application', на которую будет ссылаться Gunicorn
-application = init_app()
-
-if __name__ == "__main__":
-    init_db()
-    
-    if not WEBHOOK_URL:
-        # Режим Polling (для локального теста)
-        logging.info("Starting bot in Polling mode...")
-        dp.run_polling(bot)
-    else:
-        # Режим Webhook (запускается Gunicorn'ом на Render)
-        logging.info("Starting bot in Webhook mode (Gunicorn handles execution).")
-        # Если вы хотите запустить локально в режиме веб-хука БЕЗ Gunicorn,
-        # раскомментируйте код ниже:
-        # from aiohttp import web
-        # web.run_app(
-        #     application,
-        #     host=WEB_SERVER_HOST,
-        #     port=WEB_SERVER_PORT,
-        # )
+# Gunicorn запускается через Procfile:
+# web: gunicorn -w 4 -k aiohttp.worker.GunicornWebWorker bot_app:application
