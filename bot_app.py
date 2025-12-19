@@ -24,10 +24,19 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# !!! ВАЖНО: ЗАМЕНИТЕ ЭТИ ЗНАЧЕНИЯ !!!
-# API_TOKEN должен быть получен из ENV на Render
-API_TOKEN = os.getenv("BOT_TOKEN", 'ВАШ_ТОКЕН_ДЛЯ_ТЕСТА') 
-ADMIN_ID = int(os.getenv("ADMIN_ID", 752078351)) # ВАШ ID
+# !!! ВАЖНО: ПРОВЕРЬТЕ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ НА RENDER: BOT_TOKEN и ADMIN_IDS !!!
+API_TOKEN = os.getenv("8483546485:AAEtBnI8QDW07CgHbHXoapLYov1ELwORjeA")
+
+# --- НАСТРОЙКА НЕСКОЛЬКИХ АДМИНОВ ---
+ADMIN_IDS_STR = os.getenv("1914909377", "752077351") 
+try:
+    ADMIN_IDS = [int(i.strip()) for i in ADMIN_IDS_STR.split(',')]
+except ValueError:
+    logging.error("ADMIN_IDS: Неверный формат ID в переменной окружения. Используйте числа через запятую.")
+    ADMIN_IDS = [752077351] # Защита
+
+NOTIFICATION_ADMIN_ID = ADMIN_IDS[0] 
+
 ADMIN_USERNAME = "@Dina_Di_Ru"
 CONTACT_PHONES = ["+998972488886", "+998975690286"]
 DB_NAME = 'dino_club.db'
@@ -45,8 +54,13 @@ WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}" if BASE_WEBHOOK_URL else None
 if not API_TOKEN:
     raise ValueError("Переменная окружения BOT_TOKEN не установлена")
 
+if API_TOKEN:
+    logging.info(f"DEBUG RENDER: API_TOKEN is set. Length: {len(API_TOKEN)}")
+    logging.info(f"DEBUG RENDER: Admin IDs: {ADMIN_IDS}")
+# ----------------------------------------
 
-# --- 2. БАЗА ДАННЫХ (ОСТАВЛЕНО БЕЗ ИЗМЕНЕНИЙ) ---
+
+# --- 2. БАЗА ДАННЫХ (ОБЕРНУТО В СИНХРОННЫЕ ФУНКЦИИ ДЛЯ ASYNCIO.TO_THREAD) ---
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -113,34 +127,22 @@ def get_all_users():
 def get_all_questions():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute('SELECT id, user_id, question_text, date FROM questions ORDER BY date DESC')
+    cursor.execute('''
+        SELECT q.id, q.user_id, q.question_text, q.date, u.full_name 
+        FROM questions q 
+        LEFT JOIN users u ON q.user_id = u.user_id
+        ORDER BY date DESC
+    ''')
     rows = cursor.fetchall()
     conn.close()
     return rows
 
-def clear_users():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM users')
-    cursor.execute('DELETE FROM enrollments')
-    conn.commit()
-    conn.close()
 
-def clear_questions():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM questions')
-    conn.commit()
-    conn.close()
+# --- 3. НАСТРОЙКА БОТА, ТЕКСТЫ И ПРЕДМЕТЫ ---
 
-
-# --- 3. НАСТРОЙКА БОТА, ТЕКСТЫ И ПРЕДМЕТЫ (ОСТАВЛЕНО БЕЗ ИЗМЕНЕНИЙ) ---
-
-# Инициализация диспетчера с хранилищем
 dp = Dispatcher(storage=MemoryStorage())
 bot = Bot(token=API_TOKEN)
 
-# Текстовые константы (без изменений)
 STRINGS = {
     'ru': {
         'menu': 'Выберите действие:', 'sub': '📚 Курсы', 'reg': '📞 Регистрация',
@@ -149,10 +151,14 @@ STRINGS = {
         'tel': 'Введите телефон (например: +998901234567):', 'tel_error': '❌ Неверный формат телефона. Пожалуйста, введите корректный номер, например: +998901234567',
         'saved': '✅ Сохранено!', 'select_course': 'Выберите направление для записи:',
         'contact': '📞 Связь',
-        'reg_already': 'Я уже учусь в Dino Club', 'reg_new': 'Я еще не учусь, но планирую',
-        'reg_prompt': 'Выберите, пожалуйста, ваш статус:',
-        'fio_msg_already': 'Введите Ваше полное ФИО, чтобы мы могли найти Ваш профиль и обновить данные:',
-        'fio_msg_new': 'Введите Ваше полное ФИО для первичной регистрации:',
+        
+        # УДАЛЕННЫЕ ИЗ ЛОГИКИ СТРОКИ (теперь закомментированы для чистоты):
+        # 'reg_already': 'Я уже учусь в Dino Club', 
+        # 'reg_new': 'Я еще не учусь, но планирую',
+        # 'reg_prompt': 'Выберите, пожалуйста, ваш статус:', 
+        
+        'fio_msg_new': 'Введите Ваше полное ФИО для первичной регистрации и записи на курс:',
+        'fio_msg_already': 'Введите Ваше полное ФИО для первичной регистрации и записи на курс:',
         'schedule_header': 'Обзор расписания по курсу:',
         'reg_complete': 'Регистрация завершена! Вы записаны на курс:',
         'reg_data_saved': 'Ваши данные сохранены. Теперь выберите курс.'
@@ -166,11 +172,14 @@ STRINGS = {
         'loc_text': "📍 Biz bu yerda joylashganmiz (Google Xarita havolasi): [Manzil]",
         'select_course': "Ro'yxatdan o'tish uchun kursni tanlang:",
         'contact': "📞 Kontakt",
-        'reg_already': "Men allaqachon Dino Clubda o'qiyman",
-        'reg_new': "Men hali o'qimayman, lekin rejalashtirmoqdaman",
-        'reg_prompt': "Iltimos, holatingizni tanlang:",
-        'fio_msg_already': "Ma'lumotlaringizni yangilash uchun to'liq F.I.SH.ingizni kiriting:",
-        'fio_msg_new': "Boshlang'ich ro'yxatdan o'tish uchun to'liq F.I.SH.ingizni kiriting:",
+        
+        # УДАЛЕННЫЕ ИЗ ЛОГИКИ СТРОКИ (теперь закомментированы для чистоты):
+        # 'reg_already': "Men allaqachon Dino Clubda o'qiyman",
+        # 'reg_new': "Men hali o'qimayman, lekin rejalashtirmoqdaman",
+        # 'reg_prompt': "Iltimos, holatingizni tanlang:",
+        
+        'fio_msg_new': "Boshlang'ich ro'yxatdan o'tish va kursga yozilish uchun to'liq F.I.SH.ingizni kiriting:",
+        'fio_msg_already': "Boshlang'ich ro'yxatdan o'tish va kursga yozilish uchun to'liq F.I.SH.ingizni kiriting:", 
         'schedule_header': "Kurs bo'yicha dars jadvali:",
         'reg_complete': "Ro'yxatdan o'tish yakunlandi! Siz kursga yozildingiz:",
         'reg_data_saved': "Ma'lumotlaringiz saqlandi. Endi kursni tanlang."
@@ -253,7 +262,6 @@ ENGLISH_TEST_QUESTIONS = [
     ["14. She has lived in London ____ ten years.", ["since", "for", "on", "at"], 1],
     ["15. The new hospital ____ next year.", ["build", "will be built", "is building", "built"], 1],
 ]
-
 # --- 4. МАШИНА СОСТОЯНИЙ И КЛАВИАТУРА ---
 
 class Form(StatesGroup):
@@ -263,7 +271,6 @@ class Form(StatesGroup):
     ask_q = State()
     bc = State()
     test_q = State()
-    # НОВОЕ СОСТОЯНИЕ для ответа администратора
     wait_for_admin_answer = State() 
 
 
@@ -281,27 +288,21 @@ def main_kb(lang):
 
     return kb.as_markup()
 
-# --- Новые клавиатуры для админ-панели ---
-
 def admin_reply_kb(target_user_id: int):
-    """Клавиатура с кнопкой 'Ответить' для уведомления о вопросе."""
     kb = InlineKeyboardBuilder()
-    # callback_data содержит ID пользователя, которому нужно ответить
     kb.add(types.InlineKeyboardButton(text="➡️ Ответить", callback_data=f"admin_reply_{target_user_id}"))
     return kb.as_markup()
 
 def admin_cancel_kb():
-    """Клавиатура для отмены действия админа."""
     kb = InlineKeyboardBuilder()
     kb.add(types.InlineKeyboardButton(text="❌ Отмена", callback_data="admin_cancel"))
     return kb.as_markup()
     
 def admin_main_kb():
-    """Основная клавиатура админ-панели."""
     kb = InlineKeyboardBuilder()
     kb.row(types.InlineKeyboardButton(text="👥 Все пользователи", callback_data="admin_users_list"))
     kb.row(types.InlineKeyboardButton(text="❓ Все вопросы", callback_data="admin_questions_list"))
-    kb.row(types.InlineKeyboardButton(text="🔄 Главное меню бота", callback_data="lang_ru")) # Возвращение в RU меню
+    kb.row(types.InlineKeyboardButton(text="🔄 Главное меню бота", callback_data="lang_ru")) 
     return kb.as_markup()
 
 
@@ -335,17 +336,20 @@ async def route(c: types.CallbackQuery, state: FSMContext):
     _, act, lang = c.data.split("_")
     s = STRINGS[lang]
 
-    # ... (ОБРАБОТЧИКИ NAV_REG, NAV_SUB, NAV_RES, NAV_CONTACT, NAV_CAB, NAV_TST - БЕЗ СУЩЕСТВЕННЫХ ИЗМЕНЕНИЙ) ...
-    
+    # --- ЛОГИКА РЕГИСТРАЦИИ (nav_reg) ---
     if act == "reg":
-        kb = InlineKeyboardBuilder()
-        kb.row(types.InlineKeyboardButton(text=s['reg_already'], callback_data=f"reg_type_already_{lang}"))
-        kb.row(types.InlineKeyboardButton(text=s['reg_new'], callback_data=f"reg_type_new_{lang}"))
-        kb.row(types.InlineKeyboardButton(text=s['back'], callback_data=f"lang_{lang}"))
+        # Сразу переходим к запросу ФИО
+        prompt_text = s['fio_msg_new'] 
+        
+        await state.update_data(l=lang, reg_type='new') 
+        
         try:
-            await c.message.edit_text(s['reg_prompt'], reply_markup=kb.as_markup())
+            await c.message.edit_text(prompt_text)
         except TelegramBadRequest:
-            await c.message.answer(s['reg_prompt'], reply_markup=kb.as_markup())
+            await c.message.answer(prompt_text)
+
+        await state.set_state(Form.name)
+    # --- КОНЕЦ ЛОГИКИ РЕГИСТРАЦИИ ---
 
     elif act == "sub":
         kb = InlineKeyboardBuilder()
@@ -358,7 +362,6 @@ async def route(c: types.CallbackQuery, state: FSMContext):
             await c.message.answer(s['cat'], reply_markup=kb.as_markup())
 
     elif act == "loc":
-        # Отправляем локацию
         try:
             await bot.send_location(c.message.chat.id, 
                                      latitude=LOCATION_COORDS['latitude'], 
@@ -366,13 +369,12 @@ async def route(c: types.CallbackQuery, state: FSMContext):
         except Exception as e:
             logging.error(f"Failed to send location: {e}")
             
-        # ИСПРАВЛЕНИЕ: Корректный URL для Google Maps (long-link)
-        maps_url = f"https://www.google.com/maps/search/?api=1&query={LOCATION_COORDS['latitude']},{LOCATION_COORDS['longitude']}"
+        maps_link = f"https://maps.app.goo.gl/6CfCKHuA9mwp4m5C9?q={LOCATION_COORDS['latitude']},{LOCATION_COORDS['longitude']}"
         text = (
             "📍 **Мы находимся здесь:**\n"
-            f"[Открыть в Google Maps]({https://maps.app.goo.gl/iX4zLumXwVS1v58p8})" if lang == 'ru' else
+            f"[Открыть в Google Maps]({maps_link})" if lang == 'ru' else
             "📍 **Biz bu yerda joylashganmiz:**\n"
-            f"[Google Xaritada ochish]({https://maps.app.goo.gl/iX4zLumXwVS1v58p8})"
+            f"[Google Xaritada ochish]({maps_link})"
         )
         await c.message.answer(text, parse_mode="Markdown", reply_markup=main_kb(lang))
         
@@ -419,7 +421,6 @@ async def route(c: types.CallbackQuery, state: FSMContext):
         text += f"👤 **Telegram:** [{ADMIN_USERNAME}]({admin_link})\n"
         
         for i, phone in enumerate(CONTACT_PHONES, 1):
-            # Ссылка tel: используется, чтобы на мобильном телефоне сразу начать звонок
             text += f"📱 **Телефон {i}:** [{phone}](tel:{phone.strip('+')})\n"
             
         text += "\nМы рады вам помочь!" if lang == 'ru' else "\nSizga yordam berishdan mamnunmiz!"
@@ -429,10 +430,10 @@ async def route(c: types.CallbackQuery, state: FSMContext):
         try:
             await c.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
         except TelegramBadRequest:
-             await c.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+            await c.message.answer(text, parse_mode="Markdown", reply_markup=kb)
 
     elif act == "cab":
-        user_data = get_user_data(c.from_user.id)
+        user_data = await asyncio.to_thread(get_user_data, c.from_user.id)
         
         if not user_data:
             await c.message.answer("❌ Вы еще не зарегистрированы. Нажмите '📞 Регистрация'." if lang == 'ru' else f"❌ Siz hali ro'yxatdan o'tmagansiz. '{s['reg']}' tugmasini bosing.",
@@ -480,30 +481,7 @@ async def route(c: types.CallbackQuery, state: FSMContext):
         try:
             await c.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
         except TelegramBadRequest:
-             await c.message.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
-
-
-# ... (ОБРАБОТЧИКИ REG_TYPE, NAME, PHONE, REG_COURSE - БЕЗ СУЩЕСТВЕННЫХ ИЗМЕНЕНИЙ) ...
-
-@dp.callback_query(F.data.startswith("reg_type_"))
-async def process_reg_type(c: types.CallbackQuery, state: FSMContext):
-    await c.answer()
-    
-    await state.clear()
-    
-    _, _, reg_type, lang = c.data.split("_")
-    s = STRINGS[lang]
-
-    await state.update_data(l=lang, reg_type=reg_type)
-
-    prompt_text = s['fio_msg_already'] if reg_type == 'already' else s['fio_msg_new']
-
-    try:
-        await c.message.edit_text(prompt_text)
-    except TelegramBadRequest:
-        await c.message.answer(prompt_text)
-
-    await state.set_state(Form.name)
+            await c.message.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
 
 
 @dp.message(Form.name)
@@ -526,14 +504,14 @@ async def get_phone(m: types.Message, state: FSMContext):
         await m.answer(s['tel_error'])
         return
 
-    save_user(m.from_user.id, data['n'], m.text)
+    await asyncio.to_thread(save_user, m.from_user.id, data['n'], m.text)
 
-    reg_status_ru = "УЖЕ УЧИТСЯ" if data.get('reg_type') == 'already' else "НОВЫЙ КАНДИДАТ"
+    reg_status_ru = "НОВЫЙ КАНДИДАТ / ОБНОВЛЕНИЕ ДАННЫХ" 
 
-    # Уведомление администратора
+    # Уведомление администратору
     try:
         await bot.send_message(
-            ADMIN_ID,
+            NOTIFICATION_ADMIN_ID,
             f"🔔 НОВЫЙ ВВОД ДАННЫХ ({reg_status_ru}):\n"
             f"ФИО: {data['n']}\n"
             f"Телефон: {m.text}",
@@ -557,19 +535,19 @@ async def enroll_course(c: types.CallbackQuery, state: FSMContext):
     _, _, course_key, lang = c.data.split("_")
     s = STRINGS[lang]
 
-    save_enrollment(c.from_user.id, course_key)
+    await asyncio.to_thread(save_enrollment, c.from_user.id, course_key)
 
     course_name = SUBJECTS[course_key][lang]['name']
     
-    user_data = get_user_data(c.from_user.id)
+    user_data = await asyncio.to_thread(get_user_data, c.from_user.id)
     name, phone, _ = user_data if user_data else ("Неизвестно", "Неизвестно", None)
 
-    # Уведомление администратора
+    # Уведомление администратору
     try:
         await bot.send_message(
-            ADMIN_ID, 
+            NOTIFICATION_ADMIN_ID, 
             f"✅ **КУРС ОБНОВЛЕН/ЗАПИСЬ:**\n"
-            f"Пользователь: {name} (ID: {c.from_user.id})\n"
+            f"Пользователь: {name} (ID: `{c.from_user.id}`)\n"
             f"Телефон: {phone}\n"
             f"Курс: **{course_name}**", 
             parse_mode="Markdown")
@@ -588,27 +566,26 @@ async def enroll_course(c: types.CallbackQuery, state: FSMContext):
     await state.clear()
 
 
-# --- ОБРАБОТЧИК ВОПРОСА (ДОБАВЛЕНА КНОПКА "ОТВЕТИТЬ") ---
+# --- ОБРАБОТЧИК ВОПРОСА ---
 
 @dp.message(Form.ask_q)
 async def process_ask(m: types.Message, state: FSMContext):
-    save_question(m.from_user.id, m.text)
+    await asyncio.to_thread(save_question, m.from_user.id, m.text)
     
-    user_info = get_user_data(m.from_user.id)
+    user_info = await asyncio.to_thread(get_user_data, m.from_user.id)
     name = user_info[0] if user_info else "Неизвестный пользователь"
 
-    # 🚨 ИЗМЕНЕНИЕ: Добавлена кнопка "Ответить"
     target_id = m.from_user.id
     
-    # Уведомление администратора
+    # Уведомление администратору
     try:
         await bot.send_message(
-            ADMIN_ID, 
+            NOTIFICATION_ADMIN_ID, 
             f"❓ **НОВЫЙ ВОПРОС (АННОНИМНО):**\n"
             f"От: {name} (ID: `{target_id}`)\n"
             f"Текст: {m.text}", 
             parse_mode="Markdown",
-            reply_markup=admin_reply_kb(target_id) # <- Кнопка Ответить
+            reply_markup=admin_reply_kb(target_id)
         )
     except (TelegramBadRequest, TelegramForbiddenError) as e:
         logging.error(f"Failed to send admin notification: {e}")
@@ -618,8 +595,112 @@ async def process_ask(m: types.Message, state: FSMContext):
     await state.clear()
 
 
-# ... (ОСТАЛЬНЫЕ ОБРАБОТЧИКИ НАВИГАЦИИ БЕЗ ИЗМЕНЕНИЙ) ...
+# --- ОБРАБОТЧИКИ АДМИН-ПАНЕЛИ (Используют ADMIN_IDS) ---
 
+@dp.message(Command("admin"), F.from_user.id.in_(ADMIN_IDS))
+async def admin_panel_cmd(m: types.Message):
+    await m.answer("⚙️ **Админ-панель**", reply_markup=admin_main_kb(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "admin_panel", F.from_user.id.in_(ADMIN_IDS))
+async def admin_panel_cb(c: types.CallbackQuery, state: FSMContext):
+    await c.answer()
+    await state.clear()
+    try:
+        await c.message.edit_text("⚙️ **Админ-панель**", reply_markup=admin_main_kb(), parse_mode="Markdown")
+    except TelegramBadRequest:
+        await c.message.answer("⚙️ **Админ-панель**", reply_markup=admin_main_kb(), parse_mode="Markdown")
+
+
+@dp.callback_query(F.data == "admin_users_list", F.from_user.id.in_(ADMIN_IDS))
+async def show_all_users(c: types.CallbackQuery):
+    await c.answer()
+    users = await asyncio.to_thread(get_all_users) 
+    
+    text = "👥 **Список всех пользователей:**\n\n"
+    if not users:
+        text += "Нет зарегистрированных пользователей."
+    else:
+        for user_id, name, phone in users:
+            text += f"ID: `{user_id}`\nИмя: {name}\nТелефон: {phone}\n---\n"
+            
+    kb = InlineKeyboardBuilder().row(types.InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")).as_markup()
+    try:
+        await c.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    except TelegramBadRequest:
+        await c.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+
+@dp.callback_query(F.data == "admin_questions_list", F.from_user.id.in_(ADMIN_IDS))
+async def show_all_questions(c: types.CallbackQuery):
+    await c.answer()
+    questions = await asyncio.to_thread(get_all_questions) 
+    
+    text = "❓ **Список вопросов:**\n\n"
+    if not questions:
+        text += "Вопросов пока нет."
+    else:
+        for q_id, user_id, q_text, date, name in questions:
+            user_name = name if name else "Аноним"
+            text += f"ID: {q_id} | От: {user_name} (`{user_id}`)\n"
+            text += f"Дата: {date}\nТекст: _{q_text}_\n---\n"
+            
+    kb = InlineKeyboardBuilder().row(types.InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")).as_markup()
+    try:
+        await c.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    except TelegramBadRequest:
+        await c.message.answer(text, parse_mode="Markdown", reply_markup=kb)
+
+
+@dp.callback_query(F.data.startswith("admin_reply_"), F.from_user.id.in_(ADMIN_IDS))
+async def start_admin_reply(c: types.CallbackQuery, state: FSMContext):
+    await c.answer()
+    target_user_id = int(c.data.split("_")[2])
+    
+    await state.clear()
+    await state.update_data(target_id=target_user_id)
+    await state.set_state(Form.wait_for_admin_answer)
+    
+    await c.message.answer(
+        f"📝 **Режим ответа**\nВведите текст для пользователя с ID `{target_user_id}`. Этот текст будет отправлен ему напрямую.",
+        reply_markup=admin_cancel_kb(),
+        parse_mode="Markdown"
+    )
+
+@dp.message(Form.wait_for_admin_answer, F.from_user.id.in_(ADMIN_IDS))
+async def send_admin_reply(m: types.Message, state: FSMContext):
+    data = await state.get_data()
+    target_id = data.get('target_id')
+    
+    if target_id is None:
+        await m.answer("❌ Ошибка: Не найден целевой ID пользователя. Начните ответ заново.", reply_markup=admin_main_kb())
+        await state.clear()
+        return
+        
+    try:
+        # Отправляем ответ пользователю
+        await bot.send_message(
+            target_id,
+            f"👤 **Ответ администратора:**\n\n{m.text}",
+            parse_mode="Markdown"
+        )
+        await m.answer(f"✅ Ответ успешно отправлен пользователю `{target_id}`.", reply_markup=admin_main_kb())
+        
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
+        await m.answer(f"❌ Не удалось отправить сообщение пользователю `{target_id}`. Возможно, он заблокировал бота. Причина: {e}", reply_markup=admin_main_kb())
+        logging.error(f"Failed to send admin reply to {target_id}: {e}")
+        
+    await state.clear()
+
+@dp.callback_query(F.data == "admin_cancel", F.from_user.id.in_(ADMIN_IDS))
+async def admin_cancel_action(c: types.CallbackQuery, state: FSMContext):
+    await c.answer("Действие отменено.")
+    try:
+        await c.message.edit_text("❌ Действие отменено.", reply_markup=admin_main_kb())
+    except TelegramBadRequest:
+        await c.message.answer("❌ Действие отменено.", reply_markup=admin_main_kb())
+    await state.clear()
+
+
+# --- (Остальные обработчики навигации и теста) ---
 @dp.callback_query(F.data.startswith("cat_"))
 async def show_cat(c: types.CallbackQuery):
     await c.answer()
@@ -678,8 +759,6 @@ async def show_det(c: types.CallbackQuery):
     except TelegramBadRequest:
         await c.message.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
 
-
-# --- ОБРАБОТЧИКИ ТЕСТА (ОСТАВЛЕНО БЕЗ ИЗМЕНЕНИЙ) ---
 
 async def ask_test_question(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -773,220 +852,64 @@ async def finish_test(message: types.Message, state: FSMContext):
                           "Ajoyib natija!")
     
     header = "Тест завершен!" if lang == 'ru' else "Test yakunlandi!"
-    result_label = "Ваш результат:" if lang == 'ru' else "To'g'ri javoblar soni:"
-    correct_answers_text = "правильных ответов." if lang == 'ru' else "to'g'ri javob."
-    level_label = "Ваш примерный уровень (неточный):" if lang == 'ru' else "Sizning darajangiz (aniq emas):"
-    rec_label = "Рекомендация:" if lang == 'ru' else "Tavsiya:"
-    footer_text = f"Чтобы записаться, нажмите '📞 {s['reg']}' в главном меню." if lang == 'ru' else f"Ro'yxatdan o'tish uchun bosing '📞 {s['reg']}' asosiy menyuda."
+    result_label = "Ваш результат:" if lang == 'ru' else "Sizning natijangiz:"
+    level_label = "Рекомендованный уровень:" if lang == 'ru' else "Tavsiya etilgan daraja:"
     
-    result_text = (
-        f"🎉 **{header}**\n"
-        f"{result_label} **{final_score} из {total_questions}** {correct_answers_text}\n\n"
-        f"📊 **{level_label}** {level}\n"
-        f"💡 **{rec_label}** {recommendation}\n\n"
-        f"{footer_text}"
+    final_text = (
+        f"**{header}**\n\n"
+        f"*{result_label}* **{final_score}** {('правильных из' if lang == 'ru' else 'to\'g\'ri javoblar')} **{total_questions}**.\n"
+        f"*{level_label}* **{level}**.\n\n"
+        f"_{recommendation}_"
     )
 
-    await message.answer(result_text, parse_mode="Markdown")
-
+    await message.answer(final_text, parse_mode="Markdown", reply_markup=main_kb(lang))
     await state.clear()
-    await message.answer(s['menu'], reply_markup=main_kb(lang))
 
 
-# --- 6. ОБРАБОТЧИКИ АДМИНА (СИСТЕМА ОТВЕТОВ) ---
-
-@dp.message(Command("admin"))
-async def admin_panel(m: types.Message):
-    if m.from_user.id != ADMIN_ID:
-        return
-    
-    await m.answer("⚙️ **Админ-панель**\nВыберите действие:", 
-                   parse_mode="Markdown",
-                   reply_markup=admin_main_kb())
-
-
-@dp.callback_query(F.data.startswith("admin_reply_"), F.from_user.id == ADMIN_ID)
-async def start_admin_reply(c: types.CallbackQuery, state: FSMContext):
-    await c.answer("Начало ответа...")
-    
-    # Извлекаем ID пользователя из callback_data
-    try:
-        target_user_id = int(c.data.split("_")[-1])
-    except ValueError:
-        await c.message.answer("❌ Ошибка: Некорректный ID пользователя.")
-        return
-
-    await state.update_data(target_id=target_user_id)
-    await state.set_state(Form.wait_for_admin_answer)
-    
-    # Редактируем сообщение, чтобы показать, кому отвечаем, и добавляем Отмену
-    try:
-        await c.message.edit_text(
-            f"✅ Вы отвечаете пользователю с ID: `{target_user_id}`. Введите текст ответа:",
-            parse_mode="Markdown",
-            reply_markup=admin_cancel_kb()
-        )
-    except TelegramBadRequest:
-        # Если не удалось отредактировать, отправляем новое сообщение
-        await c.message.answer(
-            f"✅ Вы отвечаете пользователю с ID: `{target_user_id}`. Введите текст ответа:",
-            parse_mode="Markdown",
-            reply_markup=admin_cancel_kb()
-        )
-
-
-@dp.message(Form.wait_for_admin_answer, F.from_user.id == ADMIN_ID)
-async def process_admin_answer(m: types.Message, state: FSMContext):
-    data = await state.get_data()
-    target_user_id = data.get('target_id')
-    
-    if not target_user_id:
-        await m.answer("❌ Ошибка: Не найден ID пользователя для ответа. Начните заново.")
-        await state.clear()
-        return
-
-    answer_text = m.text
-    
-    # Формируем и отправляем ответ целевому пользователю
-    user_message = (
-        "📩 **Ответ от администрации Dino Club:**\n\n"
-        f"***{answer_text}***"
-    )
-
-    try:
-        await bot.send_message(target_user_id, user_message, parse_mode="Markdown")
-        await m.answer(f"✅ Ответ успешно доставлен пользователю с ID: `{target_user_id}`")
-    except (TelegramForbiddenError, TelegramBadRequest):
-        # TelegramForbiddenError - пользователь заблокировал бота
-        await m.answer(f"⚠️ Не удалось доставить ответ пользователю `{target_user_id}` (возможно, он заблокировал бота).")
-    
-    # Полностью очищаем состояние после отправки
-    await state.clear()
-    
-    # Возвращаем админа в его меню
-    await admin_panel(m)
-
-
-@dp.callback_query(F.data == "admin_cancel", F.from_user.id == ADMIN_ID)
-async def admin_cancel(c: types.CallbackQuery, state: FSMContext):
-    await c.answer("Отменено")
-    await state.clear()
-    
-    try:
-        # Редактируем сообщение, чтобы убрать кнопку "Отмена"
-        await c.message.edit_text(c.message.text.split('\n')[0], reply_markup=None)
-    except TelegramBadRequest:
-        pass
-
-    await c.message.answer("Действие отменено. Вы вернулись в главное меню администратора.")
-    await admin_panel(c.message) # Вызываем админ-панель снова
-
-
-# --- Добавление обработчиков для просмотра списков (базовый функционал) ---
-
-@dp.callback_query(F.data == "admin_users_list", F.from_user.id == ADMIN_ID)
-async def show_all_users(c: types.CallbackQuery):
-    await c.answer()
-    users = get_all_users()
-    
-    if not users:
-        text = "🤷‍♂️ Пользователей пока нет."
-    else:
-        text = "👥 **Список зарегистрированных пользователей:**\n\n"
-        for user_id, full_name, phone in users:
-            text += f"• `{user_id}` | **{full_name}** | {phone}\n"
-
-    kb = InlineKeyboardBuilder()
-    kb.row(types.InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel_back"))
-    
-    try:
-        await c.message.edit_text(text, parse_mode="Markdown", reply_markup=kb.as_markup())
-    except TelegramBadRequest:
-        await c.message.answer(text, parse_mode="Markdown", reply_markup=kb.as_markup())
-
-
-@dp.callback_query(F.data == "admin_questions_list", F.from_user.id == ADMIN_ID)
-async def show_all_questions(c: types.CallbackQuery):
-    await c.answer()
-    questions = get_all_questions() # Эта функция возвращает (id, user_id, question_text, date)
-    
-    if not questions:
-        text = "🤷‍♂️ Вопросов пока нет."
-    else:
-        text = "❓ **Список всех вопросов (новые сверху):**\n\n"
-        for q_id, user_id, q_text, date in questions[:10]: # Показываем только 10 последних
-            text += f"**ID:{q_id}** | `{date}`\n"
-            text += f"От: `{user_id}`\n"
-            text += f"Текст: _{q_text[:50]}..._\n"
-            # Добавляем кнопку "Ответить" прямо здесь (можно было бы сделать отдельный список)
-            text += f"[➡️ Ответить на вопрос](https://t.me/{(await bot.get_me()).username}?start=reply_{user_id})\n\n"
-
-    kb = InlineKeyboardBuilder()
-    kb.row(types.InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel_back"))
-    
-    try:
-        await c.message.edit_text(text, parse_mode="Markdown", reply_markup=kb.as_markup())
-    except TelegramBadRequest:
-        await c.message.answer(text, parse_mode="Markdown", reply_markup=kb.as_markup())
-
-
-@dp.callback_query(F.data == "admin_panel_back", F.from_user.id == ADMIN_ID)
-async def admin_panel_back(c: types.CallbackQuery, state: FSMContext):
-    await c.answer()
-    await state.clear()
-    await admin_panel(c.message)
-
-
-# --- 7. ЗАПУСК БОТА ---
+# --- 6. ЗАПУСК БОТА (WebHook для Render) ---
 
 @asynccontextmanager
-async def webhook_context(dp: Dispatcher, bot: Bot):
-    if WEBHOOK_URL:
-        # Устанавливаем Webhook
-        await bot.set_webhook(WEBHOOK_URL)
-        logging.info(f"Webhook set to: {WEBHOOK_URL}")
+async def lifespan(dispatcher: Dispatcher, bot: Bot):
+    if not WEBHOOK_URL:
+        logging.warning("WEBHOOK_URL не установлен. Запуск в режиме Long Polling.")
         yield
-        # Удаляем Webhook при завершении
-        await bot.delete_webhook()
-        logging.info("Webhook deleted.")
-    else:
-        # Для локального тестирования (Long Polling)
-        logging.info("Starting in Long Polling mode (WEBHOOK_URL not set).")
-        try:
-            yield
-        finally:
-            pass
-
+        return
+        
+    logging.info(f"Setting webhook URL to {WEBHOOK_URL}")
+    await bot.set_webhook(url=WEBHOOK_URL)
+    yield
+    logging.info("Deleting webhook...")
+    await bot.delete_webhook()
 
 async def main():
-    init_db()
-    
-    async with webhook_context(dp, bot):
-        if WEBHOOK_URL:
-            # Настройка aiohttp Web App для Webhook
+    logging.info("Initializing database...")
+    await asyncio.to_thread(init_db) 
+
+    if not WEBHOOK_URL:
+        logging.info("Starting bot in LONG POLLING mode.")
+        await dp.start_polling(bot)
+    else:
+        logging.info("Starting bot in WEBHOOK mode.")
+        
+        async with lifespan(dp, bot):
             app = web.Application()
-            app['bot'] = bot
             
-            # Регистрируем обработчик aiogram
-            SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
-            
-            # Настройка запуска
+            webhook_requests_handler = SimpleRequestHandler(
+                dispatcher=dp,
+                bot=bot,
+                secret_token=API_TOKEN.split(':')[1] if ':' in API_TOKEN else API_TOKEN 
+            )
+            webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+
             setup_application(app, dp, bot=bot)
-            
+
             runner = web.AppRunner(app)
             await runner.setup()
             site = web.TCPSite(runner, WEB_SERVER_HOST, WEB_SERVER_PORT)
-            
             logging.info(f"Starting web server on {WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
             await site.start()
             
-            # Ждем завершения (постоянно)
-            while True:
-                await asyncio.sleep(3600)
-        else:
-            # Запуск Long Polling
-            await dp.start_polling(bot)
-
+            await asyncio.Future() 
 
 if __name__ == "__main__":
     try:
@@ -994,4 +917,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logging.info("Bot stopped by user.")
     except Exception as e:
-        logging.error(f"Critical error: {e}")
+        logging.error(f"Fatal error in main loop: {e}")
